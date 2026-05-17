@@ -7,9 +7,9 @@ A Go-based tool to gather MySQL data and output it   in an HTML report.
 ### Option 1: Download Pre-compiled Binaries (Easiest)
 Go to the **Releases** tab, download the binary for your OS, and run it via terminal/command prompt:
 
-* **Linux:** `./mysql_gather_linux-<ARCH> --user=<USER> --password=<PASSWORD> --host=<HOST> --port=<PORT>
-* **Windows:** `mysql_gather_win.exe --user=<USER> --password=<PASSWORD> --host=<HOST>  --port=<PORT>
-* **Mac:** `./mysql_gather_mac_Darwin_<ARCH> --user=<USER> --password=<PASSWORD> --host=<HOST>  --port=<PORT>
+* **Linux:** ./mysql_gather_linux-<ARCH> --user=<USER> --password=<PASSWORD> --host=<HOST> --port=<PORT>
+* **Windows:** mysql_gather_win.exe --user=<USER> --password=<PASSWORD> --host=<HOST>  --port=<PORT>
+* **Mac:** ./mysql_gather_mac_Darwin_<ARCH> --user=<USER> --password=<PASSWORD> --host=<HOST>  --port=<PORT>
 
 ### Option 2: Build from Source (Requires Go installed)
 
