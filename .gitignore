@@ -1,0 +1,9 @@
+# Ignore local binaries
+mysql_gather
+mysql_gather_*
+*.exe
+*.html
+
+# Ignore local environment or IDE configs
+.DS_Store
+
