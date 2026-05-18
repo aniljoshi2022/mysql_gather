@@ -7,45 +7,44 @@ import (
 	"html/template"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// ─── Data Structures ────────────────────────────────────────────────────────
-
-type ServerSummary struct {
-	CollectedAt    string
-	Hostname       string
-	Version        string
-	VersionComment string
-	Uptime         string
-	UptimeHuman    string
-	CurrentUser    string
-	DataDir        string
-	Port           string
-	OS             string
-	Arch           string
-	CharSet        string
-	Timezone       string
+// SummaryInfo holds basic server metadata, including mysqladmin status metrics
+type SummaryInfo struct {
+	Hostname           string
+	CollectedAt        string
+	ServerVersion      string
+	Uptime             string
+	UptimeSec          string
+	TxnIsolation       string
+	ReadOnly           string
+	ConnDetails        string
+	Host               string
+	Port               string
+	User               string
+	Threads            string
+	Questions          string
+	SlowQueries        string
+	Opens              string
+	FlushTables        string
+	OpenTables         string
+	QueriesPerSec      string
+	ClusterFlowControl string // Dynamic flow control indicator in top summary
 }
 
-type GlobalVariable struct {
-	Name  string
+// KeyVal represents basic two-column status or config metrics
+type KeyVal struct {
+	Key   string
 	Value string
-	Note  string
-	Alert bool
 }
 
-type GlobalStatus struct {
-	Name  string
-	Value string
-	Note  string
-	Alert bool
-}
-
-type ProcessListRow struct {
+// ProcessInfo holds details of active threads
+type ProcessInfo struct {
 	ID      string
 	User    string
 	Host    string
@@ -54,1746 +53,1831 @@ type ProcessListRow struct {
 	Time    string
 	State   string
 	Info    string
-	Alert   bool
 }
 
-type ReplicaStatus struct {
-	Available          bool
-	IORunning          string
-	SQLRunning         string
-	SecondsBehind      string
-	MasterHost         string
-	MasterPort         string
-	ReplicateDoDBs     string
-	LastIOError        string
-	LastSQLError       string
-	IOAlert            bool
-	SQLAlert           bool
-	LagAlert           bool
-	ReplicaIOState     string
-	ReplicaSQLState    string
-	MasterLogFile      string
-	ReadMasterLogPos   string
-	RelayLogFile       string
-	ExecMasterLogPos   string
-	AutoPosition       string
+// GroupMember holds details from performance_schema.replication_group_members
+type GroupMember struct {
+	ChannelName string
+	MemberID    string
+	MemberHost  string
+	MemberPort  string
+	MemberState string
+	MemberRole  string
+	Version     string
 }
 
-type MasterStatus struct {
-	Available bool
-	File      string
-	Position  string
-	Binlog    string
-	GTIDSet   string
+// ReplicationStatus holds replica status info
+type ReplicationStatus struct {
+	ChannelName       string
+	ReplicaIORunning  string
+	ReplicaSQLRunning string
+	SourceHost        string
+	SecondsBehind     string
+	LastIOError       string
+	LastSQLError      string
 }
 
-type InnoDBStatus struct {
-	Raw      string
-	Sections []InnoDBSection
+// GRMemberStats holds Group Replication queue lengths for Flow Control checks
+type GRMemberStats struct {
+	MemberID     string
+	CertQueue    int
+	ApplierQueue int
 }
 
-type InnoDBSection struct {
-	Title string
-	KVs   []KV
+// GaleraQueueStats holds PXC / Galera Queue telemetry metrics
+type GaleraQueueStats struct {
+	RecvQueue         string
+	SendQueue         string
+	FlowControlPaused string
 }
 
-type KV struct {
-	Key   string
-	Value string
-	Alert bool
+// RouterDetails represents the structured router records parsed from the custom metadata join query
+type RouterDetails struct {
+	RouterID        string
+	RouterName      string
+	RouterLabel     string
+	Address         string
+	Version         string
+	LastCheckIn     string
+	RWPort          string
+	ROPort          string
+	RWXPort         string
+	ROXPort         string
+	RWSplitPort     string
+	MetadataUser    string
+	ReadOnlyTargets string
 }
 
-type WaitEvent struct {
-	Event     string
-	Count     string
-	TotalSec  string
-	AvgMS     string
-	Alert     bool
-}
-
-type FileIORow struct {
-	Event         string
-	Reads         string
-	Writes        string
-	MBRead        string
-	MBWritten     string
-	ReadLatency   string
-	WriteLatency  string
-}
-
-type CPUQueryRow struct {
-	Query      string
-	Executions string
-	TotalCPU   string
-	AvgCPUMS   string
-}
-
-type MemoryRow struct {
+// MemoryEvent represents sys.memory_global_by_current_bytes
+type MemoryEvent struct {
 	EventName    string
 	CurrentAlloc string
-	Alert        bool
 }
 
-type LockRow struct {
-	WaitingQuery    string
-	WaitingThread   string
-	BlockingThread   string
-	BlockingQuery   string
-	LockType        string
-	LockMode        string
+// WaitEvent represents performance_schema.events_waits_summary_global_by_event_name
+type WaitEvent struct {
+	EventName    string
+	CountStar    string
+	TotalWaitSec string
+	AvgWaitMs    string
 }
 
-type TableIORow struct {
-	Schema        string
-	Table         string
-	Reads         string
-	Writes        string
-	LatencyRead   string
-	LatencyWrite  string
+// FileIOEvent represents performance_schema.file_summary_by_event_name
+type FileIOEvent struct {
+	EventName    string
+	CountRead    string
+	CountWrite   string
+	MBRead       string
+	MBWritten    string
+	ReadLatency  string
+	WriteLatency string
 }
 
-type GatherData struct {
-	Summary       ServerSummary
-	Variables     []GlobalVariable
-	Status        []GlobalStatus
-	InnoDB        InnoDBStatus
-	Replica       ReplicaStatus
-	Master        MasterStatus
-	ProcessList   []ProcessListRow
-	WaitEvents    []WaitEvent
-	FileIO        []FileIORow
-	CPUQueries    []CPUQueryRow
-	Memory        []MemoryRow
-	Locks         []LockRow
-	TableIO       []TableIORow
-	CollectErrors []string
+// DigestStat represents the detailed statement summary from performance_schema
+type DigestStat struct {
+	Digest                 string
+	SchemaName             string
+	QuerySample            string
+	ExecCount              string
+	TotalExecSec           string
+	AvgExecMs              string
+	TotalLockSec           string
+	RowsExamined           string
+	RowsSent               string
+	CreatedTmpTables       string
+	CreatedTmpDiskTables   string
+	SortRows               string
+	NoIndexUsed            string
+	NoGoodIndexUsed        string
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
+// LockWait represents information from sys.innodb_lock_waits
+type LockWait struct {
+	WaitStarted               string
+	WaitAgeSecs               string
+	LockedTable               string
+	LockedIndex               string
+	LockedType                string
+	WaitingPid                string
+	WaitingTrxId              string
+	WaitingLockMode           string
+	WaitingQuery              string
+	BlockingPid               string
+	BlockingTrxId             string
+	BlockingLockMode          string
+	BlockingQuery             string
+	SQLKillBlockingConnection string
+}
 
-func main() {
-	host := flag.String("host", "127.0.0.1", "MySQL host")
-	port := flag.String("port", "3306", "MySQL port")
-	user := flag.String("user", "root", "MySQL user")
-	password := flag.String("password", "", "MySQL password")
-	output := flag.String("output", "mysql_gather.html", "Output HTML file")
-	flag.Parse()
+// Recommendation holds an automated advice item based on current configurations or statuses
+type Recommendation struct {
+	Type        string // CRITICAL, WARNING, INFO
+	Parameter   string
+	Description string
+}
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/?timeout=10s&readTimeout=30s&parseTime=true",
-		*user, *password, *host, *port)
+// PageData holds all variables injected into the HTML template
+type PageData struct {
+	Summary            SummaryInfo
+	EngineMetrics      []KeyVal
+	ConfigVariables    []KeyVal
+	StatusCounters     []KeyVal
+	Processes          []ProcessInfo
+	GroupMembers       []GroupMember
+	ReplicationStates  []ReplicationStatus
+	GRQueues           []GRMemberStats
+	GRFlowControlLimit string
+	GaleraStatus       []KeyVal
+	GaleraFlowControl  string
+	GaleraQueues       GaleraQueueStats
+	MasterStatus       []KeyVal
+	InnodbStatus       string
+	MemoryEvents       []MemoryEvent
+	WaitEvents         []WaitEvent
+	FileIOEvents       []FileIOEvent
+	ClusterStatus      string
+	ClusterSetStatus   string
+	RouterList         string
+	RouterOptions      string
+	Routers            []RouterDetails
+	DigestStats        []DigestStat
+	LockWaits          []LockWait
+	Recommendations    []Recommendation
+}
 
-	db2, err := sql.Open("mysql", dsn)
+// Format bytes into human-readable MB/GB strings where applicable
+func formatBytes(valStr string) string {
+	val, err := strconv.ParseFloat(valStr, 64)
 	if err != nil {
-		log.Fatalf("Failed to open DB: %v", err)
+		return valStr
 	}
-	defer db2.Close()
-	db2.SetMaxOpenConns(5)
-	db2.SetConnMaxLifetime(60 * time.Second)
-
-	if err := db2.Ping(); err != nil {
-		log.Fatalf("Cannot connect to MySQL: %v\n\nCheck your connection parameters.", err)
+	if val < 0 {
+		return valStr
 	}
-
-	fmt.Println("Connected to MySQL. Collecting diagnostics...")
-
-	data := GatherData{}
-
-	data.Summary = collectSummary(db2, *host, *port)
-	data.Variables = collectVariables(db2, &data)
-	data.Status = collectStatus(db2, &data)
-	data.InnoDB = collectInnoDB(db2, &data)
-	data.Replica = collectReplica(db2, &data)
-	data.Master = collectMaster(db2, &data)
-	data.ProcessList = collectProcessList(db2, &data)
-	data.WaitEvents = collectWaitEvents(db2, &data)
-	data.FileIO = collectFileIO(db2, &data)
-	data.CPUQueries = collectCPUQueries(db2, &data)
-	data.Memory = collectMemory(db2, &data)
-	data.Locks = collectLocks(db2, &data)
-	data.TableIO = collectTableIO(db2, &data)
-
-	fmt.Println("Data collected. Generating HTML report...")
-
-	f, err := os.Create(*output)
-	if err != nil {
-		log.Fatalf("Cannot create output file: %v", err)
+	const unit = 1024.0
+	if val < unit {
+		return fmt.Sprintf("%.0f B", val)
 	}
-	defer f.Close()
-
-	tmpl, err := template.New("report").Funcs(template.FuncMap{
-		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
-		"truncate": func(s string, n int) string {
-			if len(s) <= n {
-				return s
-			}
-			return s[:n] + "…"
-		},
-	}).Parse(htmlTemplate)
-	if err != nil {
-		log.Fatalf("Template parse error: %v", err)
+	suffixes := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB"}
+	exp := 0
+	for val >= unit && exp < len(suffixes) {
+		val /= unit
+		exp++
 	}
-
-	if err := tmpl.Execute(f, data); err != nil {
-		log.Fatalf("Template execute error: %v", err)
+	if exp == 0 {
+		return fmt.Sprintf("%.0f B", val)
 	}
-
-	fmt.Printf("\n✓ Report written to: %s\n", *output)
+	return fmt.Sprintf("%.2f %s", val, suffixes[exp-1])
 }
 
-// ─── Collectors ──────────────────────────────────────────────────────────────
-
-func collectSummary(db *sql.DB, host, port string) ServerSummary {
-	s := ServerSummary{
-		CollectedAt: time.Now().Format("2006-01-02 15:04:05 MST"),
-		Hostname:    host,
-		Port:        port,
+// Format status keys to check if they should be converted to human readable forms
+func toHumanReadable(key, val string) string {
+	lowerKey := strings.ToLower(key)
+	if strings.Contains(lowerKey, "size") || strings.Contains(lowerKey, "bytes") || strings.Contains(lowerKey, "allocation") || strings.Contains(lowerKey, "memory") || strings.Contains(lowerKey, "buffer_pool_bytes") {
+		return formatBytes(val)
 	}
-	vars := queryKV(db, "SHOW GLOBAL VARIABLES")
-	status := queryKV(db, "SHOW GLOBAL STATUS")
-
-	s.Version = vars["version"]
-	s.VersionComment = vars["version_comment"]
-	s.DataDir = vars["datadir"]
-	s.OS = vars["version_compile_os"]
-	s.Arch = vars["version_compile_machine"]
-	s.CharSet = vars["character_set_server"]
-	s.Timezone = vars["time_zone"]
-
-	if uptimeSec, ok := status["Uptime"]; ok {
-		s.Uptime = uptimeSec + "s"
-		s.UptimeHuman = formatUptime(uptimeSec)
-	}
-
-	_ = db.QueryRow("SELECT CURRENT_USER()").Scan(&s.CurrentUser)
-	return s
+	return val
 }
 
-func collectVariables(db *sql.DB, data *GatherData) []GlobalVariable {
-	vars := queryKV(db, "SHOW GLOBAL VARIABLES")
-	tracked := []struct {
-		key   string
-		label string
-	}{
-		{"max_connections", "Max Connections"},
-		{"innodb_buffer_pool_size", "InnoDB Buffer Pool Size"},
-		{"innodb_buffer_pool_instances", "Buffer Pool Instances"},
-		{"innodb_log_file_size", "InnoDB Log File Size"},
-		{"innodb_flush_log_at_trx_commit", "Flush Log at Trx Commit"},
-		{"innodb_flush_method", "InnoDB Flush Method"},
-		{"query_cache_size", "Query Cache Size"},
-		{"query_cache_type", "Query Cache Type"},
-		{"wait_timeout", "Wait Timeout"},
-		{"interactive_timeout", "Interactive Timeout"},
-		{"tmp_table_size", "Tmp Table Size"},
-		{"max_heap_table_size", "Max Heap Table Size"},
-		{"thread_cache_size", "Thread Cache Size"},
-		{"table_open_cache", "Table Open Cache"},
-		{"sort_buffer_size", "Sort Buffer Size"},
-		{"join_buffer_size", "Join Buffer Size"},
-		{"read_buffer_size", "Read Buffer Size"},
-		{"read_rnd_buffer_size", "Read RND Buffer Size"},
-		{"key_buffer_size", "Key Buffer Size"},
-		{"slow_query_log", "Slow Query Log"},
-		{"long_query_time", "Long Query Time"},
-		{"general_log", "General Log"},
-		{"binlog_format", "Binlog Format"},
-		{"sync_binlog", "Sync Binlog"},
-		{"expire_logs_days", "Expire Logs Days"},
-		{"binlog_expire_logs_seconds", "Binlog Expire Seconds"},
-		{"log_bin", "Binary Logging"},
-		{"gtid_mode", "GTID Mode"},
-		{"sql_mode", "SQL Mode"},
-		{"max_allowed_packet", "Max Allowed Packet"},
-	}
-
-	var result []GlobalVariable
-	for _, t := range tracked {
-		val, ok := vars[t.key]
-		if !ok {
-			val = "N/A"
-		}
-		gv := GlobalVariable{Name: t.label, Value: formatVarValue(t.key, val)}
-		switch t.key {
-		case "query_cache_size":
-			if val != "0" && val != "N/A" {
-				gv.Note = "Query cache deprecated; consider disabling"
-				gv.Alert = true
-			}
-		case "innodb_flush_log_at_trx_commit":
-			if val == "0" || val == "2" {
-				gv.Note = "Non-durable setting; risk of data loss on crash"
-				gv.Alert = true
-			}
-		case "sync_binlog":
-			if val == "0" {
-				gv.Note = "sync_binlog=0 risks binlog loss on crash"
-				gv.Alert = true
-			}
-		case "slow_query_log":
-			if val == "OFF" || val == "0" {
-				gv.Note = "Slow query log is disabled"
-			}
-		}
-		result = append(result, gv)
-	}
-	return result
+// Safe string-to-int conversion helper for recommendation formulas
+func getRawInt(valStr string) int {
+	valStr = strings.Split(valStr, " ")[0]
+	val, _ := strconv.Atoi(valStr)
+	return val
 }
 
-func collectStatus(db *sql.DB, data *GatherData) []GlobalStatus {
-	status := queryKV(db, "SHOW GLOBAL STATUS")
-	vars := queryKV(db, "SHOW GLOBAL VARIABLES")
-
-	tracked := []struct {
-		key   string
-		label string
-	}{
-		{"Threads_connected", "Threads Connected"},
-		{"Threads_running", "Threads Running"},
-		{"Threads_created", "Threads Created"},
-		{"Threads_cached", "Threads Cached"},
-		{"Max_used_connections", "Max Used Connections"},
-		{"Connections", "Total Connections"},
-		{"Aborted_connects", "Aborted Connects"},
-		{"Aborted_clients", "Aborted Clients"},
-		{"Innodb_buffer_pool_pages_total", "InnoDB BP Pages Total"},
-		{"Innodb_buffer_pool_pages_free", "InnoDB BP Pages Free"},
-		{"Innodb_buffer_pool_pages_dirty", "InnoDB BP Pages Dirty"},
-		{"Innodb_buffer_pool_read_requests", "InnoDB BP Read Requests"},
-		{"Innodb_buffer_pool_reads", "InnoDB BP Disk Reads"},
-		{"Innodb_row_lock_waits", "InnoDB Row Lock Waits"},
-		{"Innodb_row_lock_time_avg", "InnoDB Row Lock Avg (ms)"},
-		{"Innodb_deadlocks", "InnoDB Deadlocks"},
-		{"Innodb_os_log_written", "InnoDB OS Log Written"},
-		{"Bytes_received", "Bytes Received"},
-		{"Bytes_sent", "Bytes Sent"},
-		{"Questions", "Questions"},
-		{"Queries", "Queries"},
-		{"Slow_queries", "Slow Queries"},
-		{"Select_full_join", "Select Full Join"},
-		{"Select_scan", "Select Scan"},
-		{"Sort_merge_passes", "Sort Merge Passes"},
-		{"Created_tmp_disk_tables", "Tmp Disk Tables"},
-		{"Created_tmp_tables", "Tmp Tables"},
-		{"Open_tables", "Open Tables"},
-		{"Opened_tables", "Opened Tables"},
-		{"Table_locks_waited", "Table Locks Waited"},
-		{"Uptime", "Uptime (sec)"},
-		{"Key_read_requests", "Key Read Requests"},
-		{"Key_reads", "Key Reads"},
+// Helper to extract simple string/numeric values from JSON attributes column without external libraries
+func fetchJSONValue(jsonStr, key, fallback string) string {
+	searchKey := fmt.Sprintf(`"%s"`, key)
+	idx := strings.Index(jsonStr, searchKey)
+	if idx == -1 {
+		return fallback
 	}
-
-	maxConn := vars["max_connections"]
-	var result []GlobalStatus
-	for _, t := range tracked {
-		val, ok := status[t.key]
-		if !ok {
-			val = "N/A"
+	sub := jsonStr[idx+len(searchKey):]
+	start := -1
+	end := -1
+	inQuotes := false
+	for i, char := range sub {
+		if char == ':' || char == ' ' || char == '\t' || char == '\r' || char == '\n' {
+			continue
 		}
-		gs := GlobalStatus{Name: t.label, Value: formatStatusValue(t.key, val)}
-		switch t.key {
-		case "Threads_connected":
-			if maxConn != "" && pct(val, maxConn) > 80 {
-				gs.Note = fmt.Sprintf("%.0f%% of max_connections used", pct(val, maxConn))
-				gs.Alert = true
+		if char == '"' {
+			if !inQuotes {
+				inQuotes = true
+				start = i + 1
+			} else {
+				end = i
+				break
 			}
-		case "Threads_running":
-			if toInt(val) > 10 {
-				gs.Note = "High running threads; possible contention"
-				gs.Alert = true
+		} else {
+			if start == -1 {
+				start = i
 			}
-		case "Innodb_row_lock_waits":
-			if toInt(val) > 0 {
-				gs.Note = "Row lock contention detected"
-				gs.Alert = toInt(val) > 100
-			}
-		case "Innodb_deadlocks":
-			if toInt(val) > 0 {
-				gs.Note = "Deadlocks have occurred"
-				gs.Alert = true
-			}
-		case "Slow_queries":
-			if toInt(val) > 0 {
-				gs.Note = "Slow queries logged"
-			}
-		case "Select_full_join":
-			if toInt(val) > 0 {
-				gs.Note = "Full joins without index detected"
-				gs.Alert = toInt(val) > 100
-			}
-		case "Created_tmp_disk_tables":
-			if toInt(val) > 0 {
-				gs.Note = "Tmp tables spilled to disk"
-				gs.Alert = toInt(val) > 1000
-			}
-		case "Aborted_connects":
-			if toInt(val) > 0 {
-				gs.Note = "Some connections were aborted"
-				gs.Alert = toInt(val) > 50
+			if char == ',' || char == '}' || char == ']' {
+				end = i
+				break
 			}
 		}
-		result = append(result, gs)
 	}
-	return result
-}
-
-func collectInnoDB(db *sql.DB, data *GatherData) InnoDBStatus {
-	result := InnoDBStatus{}
-	rows, err := db.Query("SHOW ENGINE INNODB STATUS")
-	if err != nil {
-		data.CollectErrors = append(data.CollectErrors, "InnoDB Status: "+err.Error())
-		return result
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var typ, name, status string
-		if err := rows.Scan(&typ, &name, &status); err == nil {
-			result.Raw = status
+	if start != -1 && end != -1 && end > start {
+		trimmed := strings.Trim(strings.TrimSpace(sub[start:end]), `"`)
+		if trimmed != "" {
+			return trimmed
 		}
 	}
-	result.Sections = parseInnoDBStatus(result.Raw)
-	return result
+	return fallback
 }
 
-func collectReplica(db *sql.DB, data *GatherData) ReplicaStatus {
-	r := ReplicaStatus{}
-	// Try SHOW REPLICA STATUS first (MySQL 8.0.22+)
-	rows, err := db.Query("SHOW REPLICA STATUS")
-	if err != nil {
-		// Fallback to SHOW SLAVE STATUS
-		rows, err = db.Query("SHOW SLAVE STATUS")
-		if err != nil {
-			data.CollectErrors = append(data.CollectErrors, "Replica Status: "+err.Error())
-			return r
-		}
-	}
-	defer rows.Close()
+// Executed precise SQL metadata join query requested by the user
+func queryRouterMetadata(db *sql.DB) []RouterDetails {
+	var list []RouterDetails
 
-	cols, _ := rows.Columns()
-	if len(cols) == 0 {
-		return r
-	}
-	vals := make([]interface{}, len(cols))
-	valPtrs := make([]interface{}, len(cols))
-	for i := range vals {
-		valPtrs[i] = &vals[i]
-	}
-	if rows.Next() {
-		r.Available = true
-		rows.Scan(valPtrs...)
-		m := make(map[string]string)
-		for i, col := range cols {
-			if vals[i] != nil {
-				switch v := vals[i].(type) {
-				case []byte:
-					m[col] = string(v)
-				default:
-					m[col] = fmt.Sprintf("%v", v)
-				}
-			}
-		}
-		r.IORunning = coalesce(m, "Replica_IO_Running", "Slave_IO_Running")
-		r.SQLRunning = coalesce(m, "Replica_SQL_Running", "Slave_SQL_Running")
-		r.SecondsBehind = coalesce(m, "Seconds_Behind_Source", "Seconds_Behind_Master")
-		r.MasterHost = coalesce(m, "Source_Host", "Master_Host")
-		r.MasterPort = coalesce(m, "Source_Port", "Master_Port")
-		r.ReplicateDoDBs = coalesce(m, "Replicate_Do_DB", "")
-		r.LastIOError = coalesce(m, "Last_IO_Error", "")
-		r.LastSQLError = coalesce(m, "Last_SQL_Error", "")
-		r.MasterLogFile = coalesce(m, "Source_Log_File", "Master_Log_File")
-		r.ReadMasterLogPos = coalesce(m, "Read_Source_Log_Pos", "Read_Master_Log_Pos")
-		r.RelayLogFile = coalesce(m, "Relay_Log_File", "")
-		r.ExecMasterLogPos = coalesce(m, "Exec_Source_Log_Pos", "Exec_Master_Log_Pos")
-		r.AutoPosition = coalesce(m, "Auto_Position", "")
-		r.ReplicaIOState = coalesce(m, "Replica_IO_State", "Slave_IO_State")
-		r.ReplicaSQLState = coalesce(m, "Replica_SQL_Running_State", "")
+	var exists int
+	err := db.QueryRow(`
+		SELECT COUNT(*) 
+		FROM information_schema.tables 
+		WHERE TABLE_SCHEMA = 'mysql_innodb_cluster_metadata' 
+		  AND TABLE_NAME IN ('v2_routers', 'v2_router_options')
+	`).Scan(&exists)
 
-		r.IOAlert = r.IORunning != "Yes"
-		r.SQLAlert = r.SQLRunning != "Yes"
-		lag := toInt(r.SecondsBehind)
-		r.LagAlert = lag > 30
+	if err != nil || exists < 2 {
+		log.Printf("[HA Discovery] mysql_innodb_cluster_metadata tables not found. Skipping router join query.")
+		return list
 	}
-	return r
-}
 
-func collectMaster(db *sql.DB, data *GatherData) MasterStatus {
-	m := MasterStatus{}
-	// Try SHOW BINARY LOG STATUS (8.4+) then SHOW MASTER STATUS
-	tryMaster := func(query string) bool {
-		rows, err := db.Query(query)
-		if err != nil {
-			return false
-		}
-		defer rows.Close()
-		cols, _ := rows.Columns()
-		if len(cols) == 0 {
-			return false
-		}
-		vals := make([]interface{}, len(cols))
-		ptrs := make([]interface{}, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if rows.Next() {
-			m.Available = true
-			rows.Scan(ptrs...)
-			mp := make(map[string]string)
-			for i, col := range cols {
-				if vals[i] != nil {
-					switch v := vals[i].(type) {
-					case []byte:
-						mp[col] = string(v)
-					default:
-						mp[col] = fmt.Sprintf("%v", v)
-					}
-				}
-			}
-			m.File = mp["File"]
-			m.Position = mp["Position"]
-			m.Binlog = mp["Binlog_Do_DB"]
-			m.GTIDSet = coalesce(mp, "Executed_Gtid_Set", "")
-			return true
-		}
-		return false
-	}
-	if !tryMaster("SHOW BINARY LOG STATUS") {
-		tryMaster("SHOW MASTER STATUS")
-	}
-	return m
-}
+	query := `
+		SELECT
+			r.router_id,
+			IFNULL(r.router_name, ''),
+			IFNULL(o.router_label, ''),
+			IFNULL(r.address, ''),
+			IFNULL(r.version, ''),
+			IFNULL(r.last_check_in, ''),
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(r.attributes, '$.RWEndpoint')), '')      AS rw_port,
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(r.attributes, '$.ROEndpoint')), '')      AS ro_port,
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(r.attributes, '$.RWXEndpoint')), '')     AS rwx_port,
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(r.attributes, '$.ROXEndpoint')), '')     AS rox_port,
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(r.attributes, '$.RWSplitEndpoint')), '') AS rw_split_port,
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(r.attributes, '$.MetadataUser')), '')    AS metadata_user,
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(o.router_options, '$.read_only_targets')), '') AS read_only_targets
+		FROM mysql_innodb_cluster_metadata.v2_routers r
+		JOIN mysql_innodb_cluster_metadata.v2_router_options o
+			USING(router_id)
+		WHERE r.router_name IS NOT NULL
+		  AND r.router_name <> '';`
 
-func collectProcessList(db *sql.DB, data *GatherData) []ProcessListRow {
-	rows, err := db.Query("SHOW FULL PROCESSLIST")
-	if err != nil {
-		data.CollectErrors = append(data.CollectErrors, "ProcessList: "+err.Error())
-		return nil
-	}
-	defer rows.Close()
-	var result []ProcessListRow
-	for rows.Next() {
-		var id, user, host, db2, command, state sql.NullString
-		var timeSec sql.NullInt64
-		var info sql.NullString
-		rows.Scan(&id, &user, &host, &db2, &command, &timeSec, &state, &info)
-		p := ProcessListRow{
-			ID:      nullStr(id),
-			User:    nullStr(user),
-			Host:    nullStr(host),
-			DB:      nullStr(db2),
-			Command: nullStr(command),
-			Time:    fmt.Sprintf("%d", timeSec.Int64),
-			State:   nullStr(state),
-			Info:    nullStr(info),
-		}
-		if timeSec.Int64 > 30 || strings.Contains(strings.ToLower(p.State), "lock") {
-			p.Alert = true
-		}
-		result = append(result, p)
-	}
-	return result
-}
-
-func collectWaitEvents(db *sql.DB, data *GatherData) []WaitEvent {
-	q := `SELECT EVENT_NAME, COUNT_STAR,
-		ROUND(SUM_TIMER_WAIT/1000000000000,4),
-		ROUND(AVG_TIMER_WAIT/1000000000,4)
-		FROM performance_schema.events_waits_summary_global_by_event_name
-		WHERE COUNT_STAR > 0 AND EVENT_NAME NOT LIKE '%idle%'
-		ORDER BY SUM_TIMER_WAIT DESC LIMIT 15`
-	rows, err := db.Query(q)
-	if err != nil {
-		data.CollectErrors = append(data.CollectErrors, "Wait Events: "+err.Error())
-		return nil
-	}
-	defer rows.Close()
-	var result []WaitEvent
-	for rows.Next() {
-		var w WaitEvent
-		rows.Scan(&w.Event, &w.Count, &w.TotalSec, &w.AvgMS)
-		w.Alert = toFloat(w.TotalSec) > 1.0
-		result = append(result, w)
-	}
-	return result
-}
-
-func collectFileIO(db *sql.DB, data *GatherData) []FileIORow {
-	q := `SELECT EVENT_NAME, COUNT_READ, COUNT_WRITE,
-		ROUND(SUM_NUMBER_OF_BYTES_READ/1024/1024,2),
-		ROUND(SUM_NUMBER_OF_BYTES_WRITE/1024/1024,2),
-		ROUND(SUM_TIMER_READ/1000000000000,2),
-		ROUND(SUM_TIMER_WRITE/1000000000000,2)
-		FROM performance_schema.file_summary_by_event_name
-		WHERE COUNT_READ > 0 OR COUNT_WRITE > 0
-		ORDER BY (SUM_TIMER_READ+SUM_TIMER_WRITE) DESC LIMIT 15`
-	rows, err := db.Query(q)
-	if err != nil {
-		data.CollectErrors = append(data.CollectErrors, "File IO: "+err.Error())
-		return nil
-	}
-	defer rows.Close()
-	var result []FileIORow
-	for rows.Next() {
-		var f FileIORow
-		rows.Scan(&f.Event, &f.Reads, &f.Writes, &f.MBRead, &f.MBWritten, &f.ReadLatency, &f.WriteLatency)
-		result = append(result, f)
-	}
-	return result
-}
-
-func collectCPUQueries(db *sql.DB, data *GatherData) []CPUQueryRow {
-	q := `SELECT IFNULL(DIGEST_TEXT,'(unknown)'), COUNT_STAR,
-		ROUND(SUM_CPU_TIME/1000000000000,4),
-		ROUND(SUM_CPU_TIME/COUNT_STAR/100000000,2)
-		FROM performance_schema.events_statements_summary_by_digest
-		WHERE SUM_CPU_TIME > 0
-		ORDER BY SUM_CPU_TIME DESC LIMIT 15`
-	rows, err := db.Query(q)
-	if err != nil {
-		data.CollectErrors = append(data.CollectErrors, "CPU Queries: "+err.Error())
-		return nil
-	}
-	defer rows.Close()
-	var result []CPUQueryRow
-	for rows.Next() {
-		var c CPUQueryRow
-		rows.Scan(&c.Query, &c.Executions, &c.TotalCPU, &c.AvgCPUMS)
-		result = append(result, c)
-	}
-	return result
-}
-
-func collectMemory(db *sql.DB, data *GatherData) []MemoryRow {
-	q := `SELECT event_name, current_alloc
-		FROM sys.memory_global_by_current_bytes LIMIT 15`
-	rows, err := db.Query(q)
-	if err != nil {
-		// Try without sys schema
-		q2 := `SELECT EVENT_NAME, CURRENT_NUMBER_OF_BYTES_USED
-			FROM performance_schema.memory_summary_global_by_event_name
-			WHERE CURRENT_NUMBER_OF_BYTES_USED > 0
-			ORDER BY CURRENT_NUMBER_OF_BYTES_USED DESC LIMIT 15`
-		rows, err = db.Query(q2)
-		if err != nil {
-			data.CollectErrors = append(data.CollectErrors, "Memory: "+err.Error())
-			return nil
-		}
-	}
-	defer rows.Close()
-	var result []MemoryRow
-	for rows.Next() {
-		var m MemoryRow
-		rows.Scan(&m.EventName, &m.CurrentAlloc)
-		m.Alert = strings.Contains(m.CurrentAlloc, "GiB")
-		result = append(result, m)
-	}
-	return result
-}
-
-func collectLocks(db *sql.DB, data *GatherData) []LockRow {
-	// Try sys schema first
-	q := `SELECT 
-		r.trx_query AS waiting_query,
-		r.trx_id AS waiting_thread,
-		b.trx_id AS blocking_thread,
-		b.trx_query AS blocking_query,
-		'InnoDB' as lock_type,
-		'ROW LOCK' as lock_mode
-		FROM information_schema.innodb_trx b
-		JOIN information_schema.innodb_trx r ON r.trx_id != b.trx_id
-		WHERE b.trx_wait_started IS NULL AND r.trx_wait_started IS NOT NULL
-		LIMIT 10`
-	rows, err := db.Query(q)
-	if err != nil {
-		data.CollectErrors = append(data.CollectErrors, "Locks: "+err.Error())
-		return nil
-	}
-	defer rows.Close()
-	var result []LockRow
-	for rows.Next() {
-		var l LockRow
-		rows.Scan(&l.WaitingQuery, &l.WaitingThread, &l.BlockingThread, &l.BlockingQuery, &l.LockType, &l.LockMode)
-		result = append(result, l)
-	}
-	return result
-}
-
-func collectTableIO(db *sql.DB, data *GatherData) []TableIORow {
-	q := `SELECT OBJECT_SCHEMA, OBJECT_NAME,
-		COUNT_READ, COUNT_WRITE,
-		ROUND(SUM_TIMER_READ/1000000000000,4),
-		ROUND(SUM_TIMER_WRITE/1000000000000,4)
-		FROM performance_schema.table_io_waits_summary_by_table
-		WHERE COUNT_READ+COUNT_WRITE > 0
-		ORDER BY SUM_TIMER_READ+SUM_TIMER_WRITE DESC LIMIT 15`
-	rows, err := db.Query(q)
-	if err != nil {
-		data.CollectErrors = append(data.CollectErrors, "Table IO: "+err.Error())
-		return nil
-	}
-	defer rows.Close()
-	var result []TableIORow
-	for rows.Next() {
-		var t TableIORow
-		rows.Scan(&t.Schema, &t.Table, &t.Reads, &t.Writes, &t.LatencyRead, &t.LatencyWrite)
-		result = append(result, t)
-	}
-	return result
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-func queryKV(db *sql.DB, query string) map[string]string {
-	m := make(map[string]string)
 	rows, err := db.Query(query)
 	if err != nil {
-		return m
+		log.Printf("[HA Discovery] Error executing requested Router JOIN query: %v", err)
+		return list
 	}
 	defer rows.Close()
+
 	for rows.Next() {
-		var k, v string
-		if err := rows.Scan(&k, &v); err == nil {
-			m[k] = v
+		var rd RouterDetails
+		err := rows.Scan(
+			&rd.RouterID,
+			&rd.RouterName,
+			&rd.RouterLabel,
+			&rd.Address,
+			&rd.Version,
+			&rd.LastCheckIn,
+			&rd.RWPort,
+			&rd.ROPort,
+			&rd.RWXPort,
+			&rd.ROXPort,
+			&rd.RWSplitPort,
+			&rd.MetadataUser,
+			&rd.ReadOnlyTargets,
+		)
+		if err == nil {
+			list = append(list, rd)
 		}
 	}
-	return m
+	return list
 }
 
-func coalesce(m map[string]string, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k]; ok && v != "" {
-			return v
+func main() {
+	// 1. Command Line Flags for Connection Parameters (Zero Hardcoding)
+	user := flag.String("user", "root", "MySQL database user")
+	password := flag.String("password", "", "MySQL database password")
+	host := flag.String("host", "127.0.0.1", "MySQL host address")
+	port := flag.Int("port", 3306, "MySQL host port")
+	output := flag.String("output", "mysql_gather.html", "Path to write the standalone HTML report")
+	flag.Parse()
+
+	log.Printf("Starting MySQL Gatherer. Connecting to %s:%d...", *host, *port)
+
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/?parseTime=true&loc=Local", *user, *password, *host, *port)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		log.Fatalf("Error parsing connection parameters: %v", err)
+	}
+	defer db.Close()
+
+	db.SetConnMaxLifetime(15 * time.Second)
+	db.SetConnMaxIdleTime(5 * time.Second)
+	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(2)
+
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Failed to establish database connection check: %v", err)
+	}
+
+	// 3. Populate System Summary Information
+	data := PageData{
+		Summary: SummaryInfo{
+			CollectedAt:        time.Now().UTC().Format("2006-01-02 15:04:05 (UTC)"),
+			Host:               *host,
+			Port:               strconv.Itoa(*port),
+			User:               *user,
+			ClusterFlowControl: "Not Configured / Single Instance", // Default fallback
+		},
+	}
+
+	_ = db.QueryRow("SELECT @@hostname;").Scan(&data.Summary.Hostname)
+	_ = db.QueryRow("SELECT VERSION();").Scan(&data.Summary.ServerVersion)
+	_ = db.QueryRow("SELECT @@transaction_isolation;").Scan(&data.Summary.TxnIsolation)
+	
+	var ro int
+	if err := db.QueryRow("SELECT @@global.read_only;").Scan(&ro); err == nil {
+		if ro == 1 {
+			data.Summary.ReadOnly = "True (Read Only)"
+		} else {
+			data.Summary.ReadOnly = "False (Read/Write)"
 		}
 	}
-	return ""
-}
 
-func nullStr(n sql.NullString) string {
-	if n.Valid {
-		return n.String
+	var uptimeSeconds int64
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Uptime';").Scan(&uptimeSeconds)
+	if uptimeSeconds > 0 {
+		data.Summary.UptimeSec = fmt.Sprintf("%d", uptimeSeconds)
+		days := uptimeSeconds / 86400
+		hours := (uptimeSeconds % 86400) / 3600
+		minutes := (uptimeSeconds % 3600) / 60
+		data.Summary.Uptime = fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
 	}
-	return ""
-}
 
-func toInt(s string) int {
-	var n int
-	fmt.Sscanf(s, "%d", &n)
-	return n
-}
-
-func toFloat(s string) float64 {
-	var f float64
-	fmt.Sscanf(s, "%f", &f)
-	return f
-}
-
-func pct(val, max string) float64 {
-	v := toFloat(val)
-	m := toFloat(max)
-	if m == 0 {
-		return 0
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Threads_connected';").Scan(&data.Summary.Threads)
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Questions';").Scan(&data.Summary.Questions)
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Slow_queries';").Scan(&data.Summary.SlowQueries)
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Opened_tables';").Scan(&data.Summary.Opens)
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Flush_commands';").Scan(&data.Summary.FlushTables)
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Open_tables';").Scan(&data.Summary.OpenTables)
+	
+	if uptimeSeconds > 0 && data.Summary.Questions != "" {
+		qCount, _ := strconv.ParseFloat(data.Summary.Questions, 64)
+		data.Summary.QueriesPerSec = fmt.Sprintf("%.3f", qCount/float64(uptimeSeconds))
+	} else {
+		data.Summary.QueriesPerSec = "0.000"
 	}
-	return v / m * 100
-}
 
-func formatUptime(secs string) string {
-	s := toInt(secs)
-	d := s / 86400
-	h := (s % 86400) / 3600
-	m := (s % 3600) / 60
-	if d > 0 {
-		return fmt.Sprintf("%dd %dh %dm", d, h, m)
-	}
-	return fmt.Sprintf("%dh %dm", h, m)
-}
+	variablesMap := make(map[string]string)
+	statusMap := make(map[string]string)
 
-func formatVarValue(key, val string) string {
-	bytesKeys := []string{"innodb_buffer_pool_size", "innodb_log_file_size",
-		"query_cache_size", "tmp_table_size", "max_heap_table_size",
-		"sort_buffer_size", "join_buffer_size", "read_buffer_size",
-		"read_rnd_buffer_size", "key_buffer_size", "max_allowed_packet"}
-	for _, k := range bytesKeys {
-		if key == k {
-			return formatBytes(val)
-		}
-	}
-	return val
-}
+	// Section 1: Consolidated Engine Metrics (Union All query as requested)
+	metricsQuery := `
+		SELECT 'History list length' AS Metric, COUNT AS Value 
+		FROM information_schema.innodb_metrics WHERE NAME = 'trx_rseg_history_len'
+		UNION ALL
+		SELECT 'Pending normal aio reads', VARIABLE_VALUE 
+		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_data_pending_reads'
+		UNION ALL
+		SELECT 'Pending normal aio writes', VARIABLE_VALUE 
+		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_data_pending_writes'
+		UNION ALL
+		SELECT 'Pending flushes (log)', VARIABLE_VALUE 
+		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_os_log_pending_writes'
+		UNION ALL
+		SELECT 'Pending flushes (buffer pool)', VARIABLE_VALUE 
+		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_pages_flushed'
+		UNION ALL
+		SELECT 'Ibuf:size', COUNT 
+		FROM information_schema.innodb_metrics WHERE NAME = 'ibuf_size'
+		UNION ALL
+		SELECT 'Queries inside InnoDB', VARIABLE_VALUE 
+		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_thread_active'
+		UNION ALL
+		SELECT 'Queries in queue', VARIABLE_VALUE 
+		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_thread_queue'
+		UNION ALL
+		SELECT 'Total large memory allocated', VARIABLE_VALUE 
+		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_bytes_data';`
 
-func formatStatusValue(key, val string) string {
-	bytesKeys := []string{"Bytes_received", "Bytes_sent", "Innodb_os_log_written"}
-	for _, k := range bytesKeys {
-		if key == k {
-			return formatBytes(val)
-		}
-	}
-	return val
-}
-
-func formatBytes(s string) string {
-	n := toFloat(s)
-	if n == 0 {
-		return "0 B"
-	}
-	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
-	i := 0
-	for n >= 1024 && i < len(units)-1 {
-		n /= 1024
-		i++
-	}
-	return fmt.Sprintf("%.2f %s", n, units[i])
-}
-
-func parseInnoDBStatus(raw string) []InnoDBSection {
-	var sections []InnoDBSection
-	lines := strings.Split(raw, "\n")
-	var current *InnoDBSection
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "===") {
-			continue
-		}
-		if strings.ToUpper(line) == line && len(line) > 5 && !strings.HasPrefix(line, "-") {
-			if current != nil && len(current.KVs) > 0 {
-				sections = append(sections, *current)
+	if rows, err := db.Query(metricsQuery); err == nil {
+		for rows.Next() {
+			var kv KeyVal
+			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
+				statusMap[strings.ToLower(kv.Key)] = kv.Value
+				if kv.Key == "Total large memory allocated" {
+					kv.Value = formatBytes(kv.Value)
+				}
+				data.EngineMetrics = append(data.EngineMetrics, kv)
 			}
-			current = &InnoDBSection{Title: line}
-			continue
 		}
-		if current != nil && strings.Contains(line, ":") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				k := strings.TrimSpace(parts[0])
-				v := strings.TrimSpace(parts[1])
-				if k != "" && v != "" && len(k) < 60 {
-					current.KVs = append(current.KVs, KV{Key: k, Value: v})
+		rows.Close()
+	}
+
+	// Section 2: SHOW GLOBAL VARIABLES (formatted to human-readable)
+	if rows, err := db.Query("SHOW GLOBAL VARIABLES;"); err == nil {
+		for rows.Next() {
+			var kv KeyVal
+			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
+				variablesMap[strings.ToLower(kv.Key)] = kv.Value
+				kv.Value = toHumanReadable(kv.Key, kv.Value)
+				data.ConfigVariables = append(data.ConfigVariables, kv)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 3: SHOW GLOBAL STATUS (formatted to human-readable)
+	if rows, err := db.Query("SHOW GLOBAL STATUS;"); err == nil {
+		for rows.Next() {
+			var kv KeyVal
+			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
+				statusMap[strings.ToLower(kv.Key)] = kv.Value
+				kv.Value = toHumanReadable(kv.Key, kv.Value)
+				data.StatusCounters = append(data.StatusCounters, kv)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 4: SHOW ENGINE INNODB STATUS Raw Text
+	var engine string
+	var statusText string
+	if err := db.QueryRow("SHOW ENGINE INNODB STATUS;").Scan(&engine, &statusText, &statusText); err == nil {
+		data.InnodbStatus = statusText
+	}
+
+	// Section 5: HA / Replication Topology Consolidated
+	replicaRows, rErr := db.Query("SHOW REPLICA STATUS;")
+	if rErr != nil {
+		replicaRows, rErr = db.Query("SHOW SLAVE STATUS;")
+	}
+	if rErr == nil {
+		cols, _ := replicaRows.Columns()
+		for replicaRows.Next() {
+			values := make([]sql.RawBytes, len(cols))
+			scanArgs := make([]interface{}, len(cols))
+			for i := range values {
+				scanArgs[i] = &values[i]
+			}
+			if err := replicaRows.Scan(scanArgs...); err == nil {
+				status := ReplicationStatus{}
+				for i, col := range cols {
+					valStr := string(values[i])
+					switch strings.ToUpper(col) {
+					case "CONNECTION_NAME", "CHANNEL_NAME":
+						status.ChannelName = valStr
+					case "REPLICA_IO_RUNNING", "SLAVE_IO_RUNNING":
+						status.ReplicaIORunning = valStr
+					case "REPLICA_SQL_RUNNING", "SLAVE_SQL_RUNNING":
+						status.ReplicaSQLRunning = valStr
+					case "SOURCE_HOST", "MASTER_HOST":
+						status.SourceHost = valStr
+					case "SECONDS_BEHIND_SOURCE", "SECONDS_BEHIND_MASTER":
+						status.SecondsBehind = valStr
+					case "LAST_IO_ERROR":
+						status.LastIOError = valStr
+					case "LAST_SQL_ERROR":
+						status.LastSQLError = valStr
+					}
+				}
+				if status.ChannelName == "" {
+					status.ChannelName = "default"
+				}
+				data.ReplicationStates = append(data.ReplicationStates, status)
+			}
+		}
+		replicaRows.Close()
+	}
+
+	// Connected Group Replication node list
+	grQuery := `SELECT IFNULL(CHANNEL_NAME, 'group_replication'), MEMBER_ID, MEMBER_HOST, MEMBER_PORT, MEMBER_STATE, MEMBER_ROLE, MEMBER_VERSION 
+	            FROM performance_schema.replication_group_members;`
+	if rows, err := db.Query(grQuery); err == nil {
+		for rows.Next() {
+			var m GroupMember
+			if err := rows.Scan(&m.ChannelName, &m.MemberID, &m.MemberHost, &m.MemberPort, &m.MemberState, &m.MemberRole, &m.Version); err == nil {
+				data.GroupMembers = append(data.GroupMembers, m)
+			}
+		}
+		rows.Close()
+	}
+
+	// Dynamic Flow Control State Tracking Evaluator
+	clusterFCStatus := "Inactive (Healthy)"
+	isClusterConfigured := false
+
+	// Group Replication Flow Control status checks
+	var grFCActive string
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'group_replication_flow_control_active'").Scan(&grFCActive)
+	if grFCActive != "" {
+		isClusterConfigured = true
+		if grFCActive == "ON" || grFCActive == "1" || strings.ToLower(grFCActive) == "active" {
+			clusterFCStatus = "Active (Group Replication Throttling)"
+		} else {
+			clusterFCStatus = "Inactive (Group Replication Healthy)"
+		}
+		data.GRFlowControlLimit = fmt.Sprintf("Flow Control Active State: %s", grFCActive)
+	}
+
+	// Group Replication Queue sizes
+	grQueueQuery := `
+		SELECT MEMBER_ID, 
+		       COUNT_TRANSACTIONS_IN_QUEUE AS cert_queue, 
+		       COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE AS applier_queue 
+		FROM performance_schema.replication_group_member_stats;`
+	if rows, err := db.Query(grQueueQuery); err == nil {
+		for rows.Next() {
+			var qs GRMemberStats
+			if err := rows.Scan(&qs.MemberID, &qs.CertQueue, &qs.ApplierQueue); err == nil {
+				data.GRQueues = append(data.GRQueues, qs)
+				isClusterConfigured = true
+				// If queue limit boundaries are exceeded, explicitly escalate status
+				if qs.CertQueue > 25000 || qs.ApplierQueue > 25000 {
+					clusterFCStatus = "Active (GR Queue Backlog Trigger)"
 				}
 			}
 		}
+		rows.Close()
 	}
-	if current != nil && len(current.KVs) > 0 {
-		sections = append(sections, *current)
+
+	// PXC / Galera Flow Control & Cluster queue checking
+	var pxcFCStatus string
+	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'wsrep_flow_control_status'").Scan(&pxcFCStatus)
+	if pxcFCStatus != "" {
+		isClusterConfigured = true
+		data.GaleraFlowControl = pxcFCStatus
+		if pxcFCStatus != "OFF" && pxcFCStatus != "0" && pxcFCStatus != "0.000000" {
+			clusterFCStatus = "Active (PXC Galera Paused State)"
+		} else {
+			clusterFCStatus = "Inactive (Galera Cluster Healthy)"
+		}
 	}
-	return sections
+
+	// Detailed aggregated PXC queue check
+	galeraStatsQuery := `
+		SELECT
+			IFNULL(MAX(CASE WHEN VARIABLE_NAME='wsrep_local_recv_queue' THEN VARIABLE_VALUE END), '0') AS recv_queue,
+			IFNULL(MAX(CASE WHEN VARIABLE_NAME='wsrep_local_send_queue' THEN VARIABLE_VALUE END), '0') AS send_queue,
+			IFNULL(MAX(CASE WHEN VARIABLE_NAME='wsrep_flow_control_paused' THEN VARIABLE_VALUE END), '0.000000') AS flow_control_paused
+		FROM performance_schema.global_status
+		WHERE VARIABLE_NAME IN ('wsrep_local_recv_queue', 'wsrep_local_send_queue', 'wsrep_flow_control_paused');`
+	
+	var gqs GaleraQueueStats
+	var recvQ, sendQ, fcPaused sql.NullString
+	if err := db.QueryRow(galeraStatsQuery).Scan(&recvQ, &sendQ, &fcPaused); err == nil {
+		if recvQ.Valid && recvQ.String != "" {
+			gqs.RecvQueue = recvQ.String
+		} else {
+			gqs.RecvQueue = "0"
+		}
+		if sendQ.Valid && sendQ.String != "" {
+			gqs.SendQueue = sendQ.String
+		} else {
+			gqs.SendQueue = "0"
+		}
+		if fcPaused.Valid && fcPaused.String != "" {
+			gqs.FlowControlPaused = fcPaused.String
+			pf, parseErr := strconv.ParseFloat(fcPaused.String, 64)
+			if parseErr == nil && pf > 0.05 {
+				isClusterConfigured = true
+				clusterFCStatus = fmt.Sprintf("Active (Galera Paused: %.1f%%)", pf*100.0)
+			}
+		} else {
+			gqs.FlowControlPaused = "0.000000"
+		}
+
+		if gqs.RecvQueue != "0" || gqs.SendQueue != "0" || gqs.FlowControlPaused != "0.000000" {
+			data.GaleraQueues = gqs
+			isClusterConfigured = true
+		}
+	}
+
+	galeraQuery := `
+		SELECT VARIABLE_NAME, VARIABLE_VALUE 
+		FROM performance_schema.global_status 
+		WHERE VARIABLE_NAME in ('wsrep_incoming_addresses','wsrep_cluster_size','wsrep_cluster_status');`
+	if rows, err := db.Query(galeraQuery); err == nil {
+		for rows.Next() {
+			var kv KeyVal
+			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
+				data.GaleraStatus = append(data.GaleraStatus, kv)
+				isClusterConfigured = true
+			}
+		}
+		rows.Close()
+	}
+
+	// Final Summary Cluster Flow Control assignment
+	if !isClusterConfigured {
+		data.Summary.ClusterFlowControl = "Not Configured / Single Instance"
+	} else {
+		data.Summary.ClusterFlowControl = clusterFCStatus
+	}
+
+	// Fetch JSON configurations from mysql_innodb_cluster metadata schemas
+	var clusterNameVal string
+	err = db.QueryRow("SELECT cluster_name FROM mysql_innodb_cluster_metadata.v2_clusters LIMIT 1;").Scan(&clusterNameVal)
+	if err != nil {
+		err = db.QueryRow("SELECT cluster_name FROM mysql_innodb_cluster.clusters LIMIT 1;").Scan(&clusterNameVal)
+	}
+	if clusterNameVal == "" {
+		clusterNameVal = "testcluster"
+	}
+
+	var clusterJSON string
+	clusterQueries := []string{
+		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster_metadata.v2_clusters LIMIT 1;",
+		"SELECT status FROM mysql_innodb_cluster_metadata.v2_clusters LIMIT 1;",
+		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster.clusters LIMIT 1;",
+		"SELECT status FROM mysql_innodb_cluster.clusters LIMIT 1;",
+	}
+	for _, q := range clusterQueries {
+		if err := db.QueryRow(q).Scan(&clusterJSON); err == nil && clusterJSON != "" {
+			data.ClusterStatus = clusterJSON
+			break
+		}
+	}
+
+	var clusterSetJSON string
+	clusterSetQueries := []string{
+		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster_metadata.v2_clustersets LIMIT 1;",
+		"SELECT status FROM mysql_innodb_cluster_metadata.v2_clustersets LIMIT 1;",
+		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster.clustersets LIMIT 1;",
+		"SELECT status FROM mysql_innodb_cluster.clustersets LIMIT 1;",
+	}
+	for _, q := range clusterSetQueries {
+		if err := db.QueryRow(q).Scan(&clusterSetJSON); err == nil && clusterSetJSON != "" {
+			data.ClusterSetStatus = clusterSetJSON
+			break
+		}
+	}
+
+	// Final Router metadata extraction using dynamic JOIN queries
+	data.Routers = queryRouterMetadata(db)
+
+	// Section 6: Connected replica tracking
+	binlogRows, bErr := db.Query("SHOW BINARY LOG STATUS;")
+	if bErr != nil {
+		binlogRows, bErr = db.Query("SHOW MASTER STATUS;")
+	}
+	if bErr == nil {
+		cols, _ := binlogRows.Columns()
+		if binlogRows.Next() {
+			values := make([]sql.RawBytes, len(cols))
+			scanArgs := make([]interface{}, len(cols))
+			for i := range values {
+				scanArgs[i] = &values[i]
+			}
+			if err := binlogRows.Scan(scanArgs...); err == nil {
+				for i, col := range cols {
+					data.MasterStatus = append(data.MasterStatus, KeyVal{Key: col, Value: string(values[i])})
+				}
+			}
+		}
+		binlogRows.Close()
+	}
+
+	// Section 7: Process List - SHOW FULL PROCESSLIST details
+	if rows, err := db.Query("SHOW FULL PROCESSLIST;"); err == nil {
+		for rows.Next() {
+			var p ProcessInfo
+			var dbVal sql.NullString
+			var infoVal sql.NullString
+			var stateVal sql.NullString
+			if err := rows.Scan(&p.ID, &p.User, &p.Host, &dbVal, &p.Command, &p.Time, &stateVal, &infoVal); err == nil {
+				if dbVal.Valid {
+					p.DB = dbVal.String
+				} else {
+					p.DB = "NULL"
+				}
+				if stateVal.Valid {
+					p.State = stateVal.String
+				} else {
+					p.State = ""
+				}
+				if infoVal.Valid {
+					p.Info = infoVal.String
+				} else {
+					p.Info = "NULL"
+				}
+				data.Processes = append(data.Processes, p)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 7 (Continued): History TOP query stats from performance_schema
+	historyQuery := `
+		SELECT
+			IFNULL(DIGEST, 'NULL') AS DIGEST,
+			IFNULL(SCHEMA_NAME, 'NULL') AS SCHEMA_NAME,
+			LEFT(DIGEST_TEXT, 120) AS query_sample,
+			COUNT_STAR AS exec_count,
+			ROUND(SUM_TIMER_WAIT/1000000000000, 2) AS total_exec_sec,
+			ROUND(AVG_TIMER_WAIT/1000000000, 2) AS avg_exec_ms,
+			ROUND(SUM_LOCK_TIME/1000000000000, 2) AS total_lock_sec,
+			SUM_ROWS_EXAMINED,
+			SUM_ROWS_SENT,
+			SUM_CREATED_TMP_TABLES,
+			SUM_CREATED_TMP_DISK_TABLES,
+			SUM_SORT_ROWS,
+			SUM_NO_INDEX_USED,
+			SUM_NO_GOOD_INDEX_USED
+		FROM performance_schema.events_statements_summary_by_digest
+		ORDER BY SUM_TIMER_WAIT DESC
+		LIMIT 10;`
+	
+	if rows, err := db.Query(historyQuery); err == nil {
+		for rows.Next() {
+			var d DigestStat
+			if err := rows.Scan(
+				&d.Digest, &d.SchemaName, &d.QuerySample, &d.ExecCount,
+				&d.TotalExecSec, &d.AvgExecMs, &d.TotalLockSec, &d.RowsExamined,
+				&d.RowsSent, &d.CreatedTmpTables, &d.CreatedTmpDiskTables,
+				&d.SortRows, &d.NoIndexUsed, &d.NoGoodIndexUsed,
+			); err == nil {
+				data.DigestStats = append(data.DigestStats, d)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 7 (Continued): Locking and Waiting stats from sys.innodb_lock_waits
+	lockWaitsQuery := `
+		SELECT 
+			IFNULL(wait_started, 'NULL') AS wait_started,
+			IFNULL(wait_age_secs, 0) AS wait_age_secs,
+			IFNULL(locked_table, 'NULL') AS locked_table,
+			IFNULL(locked_index, 'NULL') AS locked_index,
+			IFNULL(locked_type, 'NULL') AS locked_type,
+			IFNULL(waiting_pid, 0) AS waiting_pid,
+			IFNULL(waiting_trx_id, 'NULL') AS waiting_trx_id,
+			IFNULL(waiting_lock_mode, 'NULL') AS waiting_lock_mode,
+			IFNULL(waiting_query, 'NULL') AS waiting_query,
+			IFNULL(blocking_pid, 0) AS blocking_pid,
+			IFNULL(blocking_trx_id, 'NULL') AS blocking_trx_id,
+			IFNULL(blocking_lock_mode, 'NULL') AS blocking_lock_mode,
+			IFNULL(blocking_query, 'NULL') AS blocking_query,
+			IFNULL(sql_kill_blocking_connection, 'NULL') AS sql_kill_blocking_connection
+		FROM sys.innodb_lock_waits 
+		ORDER BY wait_age_secs DESC;`
+
+	if rows, err := db.Query(lockWaitsQuery); err == nil {
+		for rows.Next() {
+			var l LockWait
+			if err := rows.Scan(
+				&l.WaitStarted, &l.WaitAgeSecs, &l.LockedTable, &l.LockedIndex, &l.LockedType,
+				&l.WaitingPid, &l.WaitingTrxId, &l.WaitingLockMode, &l.WaitingQuery,
+				&l.BlockingPid, &l.BlockingTrxId, &l.BlockingLockMode, &l.BlockingQuery,
+				&l.SQLKillBlockingConnection,
+			); err == nil {
+				data.LockWaits = append(data.LockWaits, l)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 8: Performance Schema profiling details
+	// 8a. Global memory event allocations
+	memQuery := "SELECT event_name, current_alloc FROM sys.memory_global_by_current_bytes LIMIT 10;"
+	if rows, err := db.Query(memQuery); err == nil {
+		for rows.Next() {
+			var m MemoryEvent
+			if err := rows.Scan(&m.EventName, &m.CurrentAlloc); err == nil {
+				m.CurrentAlloc = formatBytes(m.CurrentAlloc)
+				data.MemoryEvents = append(data.MemoryEvents, m)
+			}
+		}
+		rows.Close()
+	}
+
+	// 8b. Global Wait thread event summary
+	waitsQuery := `
+		SELECT 
+			EVENT_NAME AS wait_event, 
+			COUNT_STAR AS occurrence_count, 
+			ROUND(SUM_TIMER_WAIT / 1000000000000, 4) AS total_wait_sec, 
+			ROUND(AVG_TIMER_WAIT / 1000000000, 4) AS avg_wait_ms
+		FROM performance_schema.events_waits_summary_global_by_event_name
+		WHERE COUNT_STAR > 0 
+		AND EVENT_NAME NOT LIKE '%idle%'
+		ORDER BY SUM_TIMER_WAIT DESC 
+		LIMIT 10;`
+	if rows, err := db.Query(waitsQuery); err == nil {
+		for rows.Next() {
+			var w WaitEvent
+			if err := rows.Scan(&w.EventName, &w.CountStar, &w.TotalWaitSec, &w.AvgWaitMs); err == nil {
+				data.WaitEvents = append(data.WaitEvents, w)
+			}
+		}
+		rows.Close()
+	}
+
+	// 8c. Physical File IO profile
+	ioQuery := `
+		SELECT 
+			EVENT_NAME AS io_event,
+			COUNT_READ AS total_reads,
+			COUNT_WRITE AS total_writes,
+			ROUND(SUM_NUMBER_OF_BYTES_READ / 1024 / 1024, 2) AS mb_read,
+			ROUND(SUM_NUMBER_OF_BYTES_WRITE / 1024 / 1024, 2) AS mb_written,
+			ROUND(SUM_TIMER_READ / 1000000000000, 2) AS read_latency_sec,
+			ROUND(SUM_TIMER_WRITE / 1000000000000, 2) AS write_latency_sec
+		FROM performance_schema.file_summary_by_event_name
+		WHERE COUNT_READ > 0 OR COUNT_WRITE > 0
+		ORDER BY (SUM_TIMER_READ + SUM_TIMER_WRITE) DESC
+		LIMIT 10;`
+	if rows, err := db.Query(ioQuery); err == nil {
+		for rows.Next() {
+			var f FileIOEvent
+			if err := rows.Scan(&f.EventName, &f.CountRead, &f.CountWrite, &f.MBRead, &f.MBWritten, &f.ReadLatency, &f.WriteLatency); err == nil {
+				data.FileIOEvents = append(data.FileIOEvents, f)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 10: Optimization Recommendations (Implementing status_variables_mapping.md rules)
+	data.Recommendations = make([]Recommendation, 0)
+
+	// Rule 1: Thread Pool Cache Miss Rate
+	threadsCreatedStr := statusMap["threads_created"]
+	connectionsStr := statusMap["connections"]
+	threadCacheSizeStr := variablesMap["thread_cache_size"]
+	if threadsCreatedStr != "" && connectionsStr != "" {
+		tCreated := getRawInt(threadsCreatedStr)
+		conns := getRawInt(connectionsStr)
+		if conns > 100 {
+			missRate := (float64(tCreated) / float64(conns)) * 100.0
+			if missRate > 10.0 {
+				data.Recommendations = append(data.Recommendations, Recommendation{
+					Type:      "WARNING",
+					Parameter: "thread_cache_size (Current: " + threadCacheSizeStr + ")",
+					Description: fmt.Sprintf("High Thread Cache Miss Rate detected (%.2f%%). Spawning raw OS threads under high connection activity causes excessive CPU context-switching. Increase your thread_cache_size parameter progressively (e.g. to 32, 64, or 128) to cache connection streams.", missRate),
+				})
+			}
+		}
+	}
+
+	// Rule 2: Memory Sorts vs Disk-Backed Temporary Tables (Disk Overflow Ratio)
+	tmpTablesStr := statusMap["created_tmp_tables"]
+	tmpDiskTablesStr := statusMap["created_tmp_disk_tables"]
+	if tmpTablesStr != "" && tmpDiskTablesStr != "" {
+		tTables := getRawInt(tmpTablesStr)
+		tDiskTables := getRawInt(tmpDiskTablesStr)
+		if tTables > 0 {
+			diskRatio := (float64(tDiskTables) / float64(tTables)) * 100.0
+			if diskRatio > 25.0 {
+				data.Recommendations = append(data.Recommendations, Recommendation{
+					Type:      "WARNING",
+					Parameter: "tmp_table_size & max_heap_table_size",
+					Description: fmt.Sprintf("High Disk Temporary Table Ratio (%.2f%% of %d total temp tables). Over 25%% of internal GROUP BY or DISTINCT queries are spilling from memory to disk. Increase both tmp_table_size and max_heap_table_size variables in tandem to 32M or 64M to avoid slow disk I/O.", diskRatio, tTables),
+				})
+			}
+		}
+	}
+
+	// Rule 3: Sort Buffer Capacity
+	sortMergePassesStr := statusMap["sort_merge_passes"]
+	if sortMergePassesStr != "" && uptimeSeconds > 0 {
+		merges := getRawInt(sortMergePassesStr)
+		mergeRate := float64(merges) / float64(uptimeSeconds)
+		if mergeRate > 1.0 {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "sort_buffer_size",
+				Description: fmt.Sprintf("Active sort merge pass rate is steadily rising (%.3f merges/sec). Large queries are currently splitting filesort passes into temporary files on disk. Increase sort_buffer_size moderately to 1M or 2M to optimize.", mergeRate),
+			})
+		}
+	}
+
+	// Rule 4: InnoDB Buffer Pool Hit Ratio
+	poolReadReqStr := statusMap["innodb_buffer_pool_read_requests"]
+	poolReadsStr := statusMap["innodb_buffer_pool_reads"]
+	if poolReadReqStr != "" && poolReadsStr != "" {
+		reads := float64(getRawInt(poolReadsStr))
+		requests := float64(getRawInt(poolReadReqStr))
+		if requests > 0 {
+			hitRatio := (1.0 - (reads / requests)) * 100.0
+			if hitRatio < 98.0 {
+				data.Recommendations = append(data.Recommendations, Recommendation{
+					Type:      "CRITICAL",
+					Parameter: "innodb_buffer_pool_size",
+					Description: fmt.Sprintf("Low InnoDB Buffer Pool Cache Hit Ratio (%.2f%%). The cache cannot contain your active dataset and is bypassing memory to pull blocks from disk. Allocate additional RAM to innodb_buffer_pool_size (target 70-80%% of dedicated system memory).", hitRatio),
+				})
+			}
+		}
+	}
+
+	// Rule 5: Redo Log Flush Capacity (Hourly Redo Volume)
+	osLogWrittenStr := statusMap["innodb_os_log_written"]
+	logFileSizeStr := variablesMap["innodb_log_file_size"]
+	logFilesGroupStr := variablesMap["innodb_log_files_in_group"]
+	if osLogWrittenStr != "" && logFileSizeStr != "" && uptimeSeconds > 0 {
+		written := float64(getRawInt(osLogWrittenStr))
+		hourlyRedoBytes := (written / float64(uptimeSeconds)) * 3600.0
+
+		logSize := float64(getRawInt(logFileSizeStr))
+		logGroup := float64(getRawInt(logFilesGroupStr))
+		if logGroup == 0 {
+			logGroup = 2.0
+		}
+		totalCapacity := logSize * logGroup
+
+		if hourlyRedoBytes > totalCapacity {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "innodb_log_file_size",
+				Description: fmt.Sprintf("Estimated Hourly Write Redo volume is %s, exceeding your total log file capacity of %s. Logs are rotating too frequently, forcing heavy flush checkpoints. Increase innodb_log_file_size.", formatBytes(strconv.FormatFloat(hourlyRedoBytes, 'f', 0, 64)), formatBytes(strconv.FormatFloat(totalCapacity, 'f', 0, 64))),
+			})
+		}
+	}
+
+	// Rule 6: Table Open Cache Capacity (Opened Tables Miss Rate)
+	openedTablesStr := statusMap["opened_tables"]
+	openTablesStr := statusMap["open_tables"]
+	openCacheStr := variablesMap["table_open_cache"]
+	if openedTablesStr != "" && openTablesStr != "" && openCacheStr != "" && uptimeSeconds > 0 {
+		opened := float64(getRawInt(openedTablesStr))
+		openCur := getRawInt(openTablesStr)
+		cacheCap := getRawInt(openCacheStr)
+
+		missRate := opened / float64(uptimeSeconds)
+		if missRate > 1.0 && openCur >= cacheCap {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "table_open_cache (Current Limit: " + openCacheStr + ")",
+				Description: fmt.Sprintf("High open table cache miss rate (%.2f tables opened/sec) with saturated descriptors file pool (%d open / %d cache capacity). Descriptors are constantly being evicted. Increase table_open_cache.", missRate, openCur, cacheCap),
+			})
+		}
+	}
+
+	// Rule 7: Connection Pool Saturation
+	maxUsedConnectionsStr := statusMap["max_used_connections"]
+	maxConnectionsStr := variablesMap["max_connections"]
+	if maxUsedConnectionsStr != "" && maxConnectionsStr != "" {
+		maxUsed := getRawInt(maxUsedConnectionsStr)
+		maxAllowed := getRawInt(maxConnectionsStr)
+		if maxAllowed > 0 {
+			saturation := (float64(maxUsed) / float64(maxAllowed)) * 100.0
+			if saturation > 85.0 {
+				data.Recommendations = append(data.Recommendations, Recommendation{
+					Type:      "CRITICAL",
+					Parameter: "max_connections",
+					Description: fmt.Sprintf("High Connection Pool Saturation (%.2f%% utilized). Peak concurrent user threads reached %d of %d maximum connections. Increase max_connections to avoid immediate connection timeout failures.", saturation, maxUsed, maxAllowed),
+				})
+			}
+		}
+	}
+
+	// Rule 8: Group Replication Queue & Flow Control Warning
+	for _, q := range data.GRQueues {
+		certThreshold := 25000
+		applierThreshold := 25000
+		if certLimitStr, exists := variablesMap["group_replication_flow_control_certifier_threshold"]; exists {
+			certThreshold = getRawInt(certLimitStr)
+		}
+		if applierLimitStr, exists := variablesMap["group_replication_flow_control_applier_threshold"]; exists {
+			applierThreshold = getRawInt(applierLimitStr)
+		}
+
+		if q.CertQueue > certThreshold {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "CRITICAL",
+				Parameter: "Group Replication Flow Control (Certifier Queue)",
+				Description: fmt.Sprintf("Certifier transaction queue size (%d) exceeds flow control threshold limit (%d) on node %s. Flow control triggers are active, throttling primary write rates.", q.CertQueue, certThreshold, q.MemberID),
+			})
+		}
+		if q.ApplierQueue > applierThreshold {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "CRITICAL",
+				Parameter: "Group Replication Flow Control (Applier Queue)",
+				Description: fmt.Sprintf("Applier queue size (%d) exceeds flow control threshold limit (%d) on node %s. Flow control triggers are active, throttling primary write rates.", q.ApplierQueue, applierThreshold, q.MemberID),
+			})
+		}
+	}
+
+	// Rule 9: Galera / PXC Flow Control Warnings
+	if data.GaleraFlowControl != "" {
+		fcStatus, _ := strconv.ParseFloat(data.GaleraFlowControl, 64)
+		if fcStatus > 0.1 {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "wsrep_flow_control_status",
+				Description: fmt.Sprintf("PXC/Galera Cluster Flow Control is active (%.2f%% of time spent paused). Secondary nodes are falling behind, causing replication write stalls.", fcStatus*100.0),
+			})
+		}
+	}
+
+	// Check History List Length purge metric
+	for _, m := range data.EngineMetrics {
+		if m.Key == "History list length" {
+			hll := getRawInt(m.Value)
+			if hll > 200000 {
+				data.Recommendations = append(data.Recommendations, Recommendation{
+					Type:      "CRITICAL",
+					Parameter: "trx_rseg_history_len",
+					Description: fmt.Sprintf("History list length is extremely high (%d blocks). Your InnoDB transaction purge workers cannot clean old undo logs. Investigate and terminate long-running active transactions.", hll),
+				})
+			}
+		}
+	}
+
+	// Default Fallback Recommendation
+	if len(data.Recommendations) == 0 {
+		data.Recommendations = append(data.Recommendations, Recommendation{
+			Type:        "INFO",
+			Parameter:   "Baseline Optimization Analysis",
+			Description: "All checked performance counters, temporary disk tables allocations, thread cache misses, and cache ratios fall within safe, healthy database limits.",
+		})
+	}
+
+	// 4. Compile Standalone Diagnostic HTML Output
+	outFile, err := os.Create(*output)
+	if err != nil {
+		log.Fatalf("Error producing report output file: %v", err)
+	}
+	defer outFile.Close()
+
+	tmpl, err := template.New("report").Parse(htmlTemplate)
+	if err != nil {
+		log.Fatalf("Failed to compile layout elements: %v", err)
+	}
+
+	if err := tmpl.Execute(outFile, data); err != nil {
+		log.Fatalf("Failed to execute data injection into template: %v", err)
+	}
+
+	log.Printf("MySQL Diagnostic Report built successfully at '%s'. Exiting collector...", *output)
 }
 
-// ─── HTML Template ───────────────────────────────────────────────────────────
-
+// Minimal, clean HTML matching the exact structure approved in the Canvas
 const htmlTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MySQL Gather — {{.Summary.Hostname}}:{{.Summary.Port}}</title>
-<style>
-  :root {
-    --bg: #0d1117;
-    --bg2: #161b22;
-    --bg3: #21262d;
-    --bg4: #2d333b;
-    --border: #30363d;
-    --text: #e6edf3;
-    --text2: #8b949e;
-    --text3: #6e7681;
-    --accent: #58a6ff;
-    --accent2: #79c0ff;
-    --green: #3fb950;
-    --green-bg: rgba(63,185,80,0.1);
-    --yellow: #d29922;
-    --yellow-bg: rgba(210,153,34,0.12);
-    --red: #f85149;
-    --red-bg: rgba(248,81,73,0.12);
-    --orange: #e3b341;
-    --purple: #bc8cff;
-    --teal: #56d364;
-    --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-    --radius: 6px;
-    --shadow: 0 1px 3px rgba(0,0,0,0.4);
-  }
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html { scroll-behavior: smooth; }
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 1.5;
-    display: flex;
-    min-height: 100vh;
-  }
-
-  /* ── Sidebar ── */
-  #sidebar {
-    width: 220px;
-    min-width: 220px;
-    background: var(--bg2);
-    border-right: 1px solid var(--border);
-    position: fixed;
-    top: 0; left: 0; bottom: 0;
-    overflow-y: auto;
-    z-index: 100;
-    display: flex;
-    flex-direction: column;
-  }
-  #sidebar .logo {
-    padding: 18px 16px 12px;
-    border-bottom: 1px solid var(--border);
-  }
-  #sidebar .logo h1 {
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--accent);
-    letter-spacing: 0.04em;
-  }
-  #sidebar .logo p {
-    font-size: 11px;
-    color: var(--text3);
-    margin-top: 2px;
-  }
-  #sidebar nav { flex: 1; padding: 8px 0; }
-  #sidebar nav a {
-    display: block;
-    padding: 7px 16px;
-    color: var(--text2);
-    text-decoration: none;
-    font-size: 13px;
-    border-left: 3px solid transparent;
-    transition: all 0.15s;
-  }
-  #sidebar nav a:hover, #sidebar nav a.active {
-    color: var(--text);
-    background: var(--bg3);
-    border-left-color: var(--accent);
-  }
-  #sidebar nav .section-title {
-    padding: 12px 16px 4px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text3);
-  }
-  #sidebar .collected-at {
-    padding: 12px 16px;
-    border-top: 1px solid var(--border);
-    font-size: 11px;
-    color: var(--text3);
-  }
-
-  /* ── Main Content ── */
-  #main {
-    margin-left: 220px;
-    flex: 1;
-    min-width: 0;
-    padding: 24px 28px;
-    max-width: 1400px;
-  }
-
-  /* ── Sections ── */
-  .section {
-    margin-bottom: 32px;
-    scroll-margin-top: 16px;
-  }
-  .section-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 14px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .section-header h2 {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .section-header .badge {
-    font-size: 11px;
-    padding: 2px 7px;
-    border-radius: 10px;
-    font-weight: 500;
-  }
-  .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent2); }
-  .badge-red  { background: var(--red-bg); color: var(--red); }
-  .badge-green{ background: var(--green-bg); color: var(--green); }
-  .badge-yellow{ background: var(--yellow-bg); color: var(--orange); }
-
-  /* ── Summary Cards ── */
-  .summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-  .summary-card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-  }
-  .summary-card .label {
-    font-size: 11px;
-    color: var(--text3);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 4px;
-  }
-  .summary-card .value {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-    word-break: break-all;
-  }
-  .summary-card .value.accent { color: var(--accent); }
-  .summary-card .value.green  { color: var(--green); }
-
-  /* ── KV Table ── */
-  .kv-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-  .kv-table th {
-    background: var(--bg3);
-    color: var(--text2);
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 8px 12px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-  }
-  .kv-table td {
-    padding: 7px 12px;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-    word-break: break-word;
-  }
-  .kv-table tr:last-child td { border-bottom: none; }
-  .kv-table tr:hover td { background: var(--bg3); }
-  .kv-table .key-col { color: var(--text2); width: 260px; font-family: var(--font-mono); font-size: 12px; }
-  .kv-table .val-col { color: var(--text); font-family: var(--font-mono); font-size: 12px; }
-  .kv-table .note-col { color: var(--text3); font-size: 11px; max-width: 300px; }
-  .row-alert td { background: var(--red-bg) !important; }
-  .row-alert .key-col { color: var(--red); }
-  .row-alert .val-col { color: var(--orange); font-weight: 600; }
-  .row-warn td { background: var(--yellow-bg) !important; }
-
-  /* ── Process List ── */
-  .proc-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-  .proc-table th {
-    background: var(--bg3);
-    color: var(--text2);
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 7px 10px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  .proc-table td {
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-    font-family: var(--font-mono);
-    max-width: 0;
-  }
-  .proc-table .sql-col {
-    max-width: 380px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  .proc-table .sql-col:hover { white-space: normal; word-break: break-all; }
-  .proc-table tr:last-child td { border-bottom: none; }
-  .proc-table tr:hover td { background: rgba(255,255,255,0.03); }
-  .proc-table .alert-row td { background: var(--red-bg) !important; }
-  .proc-table .time-col { color: var(--accent2); }
-  .proc-table .alert-row .time-col { color: var(--red); font-weight: 700; }
-
-  /* ── Replica Status ── */
-  .replica-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-  .replica-card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-  }
-  .replica-card.ok { border-color: var(--green); }
-  .replica-card.warn { border-color: var(--red); }
-  .replica-card .label { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
-  .replica-card .value { font-size: 16px; font-weight: 700; }
-  .replica-card .value.ok { color: var(--green); }
-  .replica-card .value.warn { color: var(--red); }
-  .replica-card .value.neutral { color: var(--text2); }
-
-  /* ── InnoDB Raw ── */
-  .innodb-raw {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-  .innodb-raw-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 14px;
-    background: var(--bg3);
-    border-bottom: 1px solid var(--border);
-  }
-  .innodb-raw-header span { font-size: 12px; color: var(--text2); }
-  .innodb-search {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text);
-    padding: 4px 8px;
-    font-size: 12px;
-    font-family: var(--font-mono);
-    width: 200px;
-    outline: none;
-  }
-  .innodb-search:focus { border-color: var(--accent); }
-  .innodb-pre {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    line-height: 1.6;
-    padding: 14px;
-    white-space: pre-wrap;
-    word-break: break-all;
-    max-height: 500px;
-    overflow-y: auto;
-    color: var(--text2);
-  }
-  .innodb-pre mark { background: rgba(210,153,34,0.35); color: var(--orange); border-radius: 2px; }
-
-  /* ── Alert Banner ── */
-  .alert-banner {
-    background: var(--red-bg);
-    border: 1px solid var(--red);
-    border-radius: var(--radius);
-    padding: 10px 14px;
-    margin-bottom: 16px;
-    font-size: 13px;
-    color: var(--red);
-  }
-  .alert-banner ul { margin: 4px 0 0 16px; }
-  .alert-banner li { margin-top: 2px; }
-
-  /* ── No Data ── */
-  .no-data {
-    padding: 20px;
-    text-align: center;
-    color: var(--text3);
-    font-size: 13px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-
-  /* ── Tabs ── */
-  .tab-bar {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 14px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tab-btn {
-    padding: 7px 14px;
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text2);
-    cursor: pointer;
-    font-size: 13px;
-    margin-bottom: -1px;
-    transition: all 0.15s;
-  }
-  .tab-btn:hover { color: var(--text); }
-  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-  .tab-pane { display: none; }
-  .tab-pane.active { display: block; }
-
-  /* ── Scrollbar ── */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg2); }
-  ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
-
-  /* ── Misc ── */
-  .text-mono { font-family: var(--font-mono); font-size: 12px; }
-  .text-dim { color: var(--text3); }
-  .text-red { color: var(--red); }
-  .text-green { color: var(--green); }
-  .text-yellow { color: var(--orange); }
-  .text-blue { color: var(--accent); }
-  .mb8 { margin-bottom: 8px; }
-  .mb16 { margin-bottom: 16px; }
-  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .dot-green { background: var(--green); box-shadow: 0 0 4px var(--green); }
-  .dot-red   { background: var(--red); box-shadow: 0 0 4px var(--red); }
-  .dot-yellow{ background: var(--orange); }
-  .section-desc { font-size: 12px; color: var(--text3); margin-bottom: 12px; }
-
-  @media (max-width: 900px) {
-    #sidebar { width: 180px; min-width: 180px; }
-    #main { margin-left: 180px; padding: 16px; }
-  }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MySQL Gather Report</title>
+    <style>
+        body {
+            font-family: Menlo, Monaco, Consolas, "Courier New", monospace, -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 12px;
+            line-height: 1.4;
+            color: #000;
+            background-color: #fff;
+            margin: 15px;
+        }
+        h1 {
+            font-size: 20px;
+            font-weight: bold;
+            color: #000;
+            margin: 0 0 5px 0;
+            border-bottom: 2px solid #000;
+            padding-bottom: 5px;
+        }
+        h2 {
+            font-size: 15px;
+            font-weight: bold;
+            color: #1a365d;
+            margin: 25px 0 10px 0;
+            border-bottom: 1.5px solid #000;
+            padding-bottom: 2px;
+        }
+        h3 {
+            font-size: 13px;
+            margin: 15px 0 5px 0;
+            color: #2b6cb0;
+        }
+        p {
+            margin: 0 0 10px 0;
+        }
+        a {
+            color: #0044cc;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        ul.sections-list {
+            padding-left: 0;
+            list-style: none;
+            margin: 10px 0 20px 0;
+        }
+        ul.sections-list li {
+            display: inline;
+            margin-right: 15px;
+        }
+        ul.sections-list li::after {
+            content: " |";
+            color: #999;
+            margin-left: 10px;
+        }
+        ul.sections-list li:last-child::after {
+            content: "";
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-bottom: 20px;
+            font-size: 11px;
+            border: 1px solid #777;
+        }
+        th, td {
+            border: 1px solid #aaa;
+            padding: 4px 6px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background-color: #d1e2ff;
+            font-weight: bold;
+            color: #000;
+        }
+        tr:nth-child(even) {
+            background-color: #f6f9fe;
+        }
+        pre {
+            background-color: #f9f9f9;
+            border: 1px dashed #777;
+            padding: 8px;
+            font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 11px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin: 10px 0;
+        }
+        .text-right {
+            text-align: right;
+        }
+        .badge {
+            display: inline-block;
+            padding: 1px 4px;
+            font-weight: bold;
+            font-size: 9px;
+            border-radius: 2px;
+            text-transform: uppercase;
+        }
+        .badge-critical {
+            background-color: #ffd8d8;
+            color: #900;
+            border: 1px solid #f88;
+        }
+        .badge-warning {
+            background-color: #ffe8b8;
+            color: #850;
+            border: 1px solid #e2a050;
+        }
+        .badge-ok {
+            background-color: #d5ffd5;
+            color: #060;
+            border: 1px solid #8e8;
+        }
+        .search-box {
+            width: 100%;
+            max-width: 300px;
+            padding: 3px 6px;
+            border: 1px solid #777;
+            font-size: 11px;
+            font-family: inherit;
+            margin-bottom: 5px;
+        }
+        footer {
+            margin-top: 40px;
+            font-size: 10px;
+            color: #555;
+            border-top: 1px solid #999;
+            padding-top: 5px;
+        }
+        .recommendation-card {
+            border-left: 4px solid #aaa;
+            padding-left: 10px;
+            margin-bottom: 12px;
+        }
+        .rec-CRITICAL {
+            border-left-color: #d9534f;
+            background-color: #fff5f5;
+        }
+        .rec-WARNING {
+            border-left-color: #f0ad4e;
+            background-color: #fcf8e3;
+        }
+        .rec-INFO {
+            border-left-color: #5bc0de;
+            background-color: #f4f9fa;
+        }
+    </style>
 </head>
 <body>
 
-<!-- Sidebar -->
-<nav id="sidebar">
-  <div class="logo">
-    <h1>⚡ mysql_gather</h1>
-    <p>Performance Diagnostic Report</p>
-  </div>
-  <nav>
-    <div class="section-title">Overview</div>
-    <a href="#summary">System Summary</a>
-    <a href="#replica">Replication</a>
-    <div class="section-title">Configuration</div>
-    <a href="#variables">Global Variables</a>
-    <a href="#status">Global Status</a>
-    <div class="section-title">Activity</div>
-    <a href="#processlist">Process List</a>
-    <a href="#innodb">InnoDB Status</a>
-    <div class="section-title">Performance Schema</div>
-    <a href="#waits">Wait Events</a>
-    <a href="#fileio">File I/O</a>
-    <a href="#memory">Memory Usage</a>
-    <a href="#cpu-queries">Top CPU Queries</a>
-    <a href="#tableio">Table I/O</a>
-    <a href="#locks">Lock Activity</a>
-  </nav>
-  <div class="collected-at">Collected: {{.Summary.CollectedAt}}</div>
-</nav>
+    <h1>🐬 MySQL Gather Report</h1>
+    
+    <div id="Sections">
+        <strong>Sections:</strong>
+        <ul class="sections-list">
+            <li><a href="#summary">1. System Summary</a></li>
+            <li><a href="#config">2. Critical Configurations</a></li>
+            <li><a href="#status">3. Performance Metrics</a></li>
+            <li><a href="#innodb">4. Storage Engine State</a></li>
+            <li><a href="#replication">5. HA &amp; Replication Topology</a></li>
+            <li><a href="#replica-source">6. Current Binary Log Status</a></li>
+            <li><a href="#process">7. Process List &amp; Query History</a></li>
+            <li><a href="#perf-schema">8. Performance Schema Insights</a></li>
+            <li><a href="#recommendations">10. Optimization Recommendations</a></li>
+        </ul>
+    </div>
 
-<!-- Main -->
-<main id="main">
-
-<!-- ── System Summary ── -->
-<section class="section" id="summary">
-  <div class="section-header">
-    <h2>System Summary</h2>
-    <span class="badge badge-blue">{{.Summary.Version}}</span>
-  </div>
-  <div class="summary-grid">
-    <div class="summary-card">
-      <div class="label">Host</div>
-      <div class="value accent">{{.Summary.Hostname}}:{{.Summary.Port}}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Version</div>
-      <div class="value">{{.Summary.Version}}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Uptime</div>
-      <div class="value green">{{.Summary.UptimeHuman}}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Current User</div>
-      <div class="value">{{.Summary.CurrentUser}}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Data Directory</div>
-      <div class="value text-mono" style="font-size:12px">{{.Summary.DataDir}}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">OS / Arch</div>
-      <div class="value">{{.Summary.OS}} / {{.Summary.Arch}}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Character Set</div>
-      <div class="value">{{.Summary.CharSet}}</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Timezone</div>
-      <div class="value">{{.Summary.Timezone}}</div>
-    </div>
-  </div>
-  <p class="text-mono text-dim" style="font-size:11px">{{.Summary.VersionComment}}</p>
-</section>
-
-<!-- ── Collection Errors ── -->
-{{if .CollectErrors}}
-<div class="alert-banner">
-  <strong>⚠ Collection Warnings</strong> — some queries could not be executed:
-  <ul>
-    {{range .CollectErrors}}<li>{{.}}</li>{{end}}
-  </ul>
-</div>
-{{end}}
-
-<!-- ── Replication ── -->
-<section class="section" id="replica">
-  <div class="section-header">
-    <h2>HA / Replication</h2>
-    {{if .Replica.Available}}
-      {{if or .Replica.IOAlert .Replica.SQLAlert .Replica.LagAlert}}
-        <span class="badge badge-red">⚠ Issues Detected</span>
-      {{else}}
-        <span class="badge badge-green">✓ Healthy</span>
-      {{end}}
-    {{else}}
-      <span class="badge badge-blue">Standalone / Source</span>
-    {{end}}
-  </div>
-
-  {{if .Master.Available}}
-  <p class="section-desc">This server is a <strong>replication source</strong> (binary logging enabled).</p>
-  <div class="replica-grid mb16">
-    <div class="replica-card ok">
-      <div class="label">Binary Log File</div>
-      <div class="value text-mono" style="font-size:13px;color:var(--teal)">{{.Master.File}}</div>
-    </div>
-    <div class="replica-card">
-      <div class="label">Binlog Position</div>
-      <div class="value" style="color:var(--accent)">{{.Master.Position}}</div>
-    </div>
-    {{if .Master.GTIDSet}}
-    <div class="replica-card">
-      <div class="label">Executed GTID Set</div>
-      <div class="value text-mono" style="font-size:11px;color:var(--text2)">{{.Master.GTIDSet}}</div>
-    </div>
-    {{end}}
-  </div>
-  {{end}}
-
-  {{if .Replica.Available}}
-  <div class="replica-grid">
-    <div class="replica-card {{if .Replica.IOAlert}}warn{{else}}ok{{end}}">
-      <div class="label"><span class="status-dot {{if .Replica.IOAlert}}dot-red{{else}}dot-green{{end}}"></span>IO Thread</div>
-      <div class="value {{if .Replica.IOAlert}}warn{{else}}ok{{end}}">{{.Replica.IORunning}}</div>
-    </div>
-    <div class="replica-card {{if .Replica.SQLAlert}}warn{{else}}ok{{end}}">
-      <div class="label"><span class="status-dot {{if .Replica.SQLAlert}}dot-red{{else}}dot-green{{end}}"></span>SQL Thread</div>
-      <div class="value {{if .Replica.SQLAlert}}warn{{else}}ok{{end}}">{{.Replica.SQLRunning}}</div>
-    </div>
-    <div class="replica-card {{if .Replica.LagAlert}}warn{{else}}ok{{end}}">
-      <div class="label">Seconds Behind Source</div>
-      <div class="value {{if .Replica.LagAlert}}warn{{else}}ok{{end}}">{{.Replica.SecondsBehind}}s</div>
-    </div>
-    <div class="replica-card">
-      <div class="label">Source Host</div>
-      <div class="value neutral text-mono" style="font-size:13px">{{.Replica.MasterHost}}:{{.Replica.MasterPort}}</div>
-    </div>
-  </div>
-  {{if .Replica.ReplicaIOState}}
-  <p class="section-desc" style="margin-top:10px">IO State: <span class="text-mono" style="color:var(--text)">{{.Replica.ReplicaIOState}}</span></p>
-  {{end}}
-  <table class="kv-table" style="margin-top:12px">
-    <tr><th class="key-col">Attribute</th><th class="val-col">Value</th></tr>
-    <tr><td class="key-col">Master Log File</td><td class="val-col">{{.Replica.MasterLogFile}}</td></tr>
-    <tr><td class="key-col">Read Master Log Pos</td><td class="val-col">{{.Replica.ReadMasterLogPos}}</td></tr>
-    <tr><td class="key-col">Relay Log File</td><td class="val-col">{{.Replica.RelayLogFile}}</td></tr>
-    <tr><td class="key-col">Exec Master Log Pos</td><td class="val-col">{{.Replica.ExecMasterLogPos}}</td></tr>
-    <tr><td class="key-col">Auto Position (GTID)</td><td class="val-col">{{.Replica.AutoPosition}}</td></tr>
-    {{if .Replica.LastIOError}}<tr class="row-alert"><td class="key-col">Last IO Error</td><td class="val-col">{{.Replica.LastIOError}}</td></tr>{{end}}
-    {{if .Replica.LastSQLError}}<tr class="row-alert"><td class="key-col">Last SQL Error</td><td class="val-col">{{.Replica.LastSQLError}}</td></tr>{{end}}
-  </table>
-  {{else if not .Master.Available}}
-  <div class="no-data">No replica status found — this server is not configured as a replica.</div>
-  {{end}}
-</section>
-
-<!-- ── Global Variables ── -->
-<section class="section" id="variables">
-  <div class="section-header">
-    <h2>Critical Configurations</h2>
-    <span class="badge badge-blue">GLOBAL VARIABLES</span>
-  </div>
-  <p class="section-desc">Key configuration variables. Highlighted rows indicate potential issues.</p>
-  <table class="kv-table">
-    <thead><tr>
-      <th class="key-col">Variable</th>
-      <th class="val-col">Value</th>
-      <th class="note-col">Note</th>
-    </tr></thead>
-    <tbody>
-    {{range .Variables}}
-    <tr {{if .Alert}}class="row-alert"{{end}}>
-      <td class="key-col">{{.Name}}</td>
-      <td class="val-col">{{.Value}}</td>
-      <td class="note-col">{{if .Note}}<span style="color:{{if .Alert}}var(--red){{else}}var(--text3){{end}}">{{.Note}}</span>{{end}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-</section>
-
-<!-- ── Global Status ── -->
-<section class="section" id="status">
-  <div class="section-header">
-    <h2>Performance Metrics</h2>
-    <span class="badge badge-blue">GLOBAL STATUS</span>
-  </div>
-  <p class="section-desc">Runtime counters. Alert rows indicate potential performance issues.</p>
-  <table class="kv-table">
-    <thead><tr>
-      <th class="key-col">Metric</th>
-      <th class="val-col">Value</th>
-      <th class="note-col">Note</th>
-    </tr></thead>
-    <tbody>
-    {{range .Status}}
-    <tr {{if .Alert}}class="row-alert"{{end}}>
-      <td class="key-col">{{.Name}}</td>
-      <td class="val-col">{{.Value}}</td>
-      <td class="note-col">{{if .Note}}<span style="color:{{if .Alert}}var(--red){{else}}var(--text3){{end}}">{{.Note}}</span>{{end}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-</section>
-
-<!-- ── Process List ── -->
-<section class="section" id="processlist">
-  <div class="section-header">
-    <h2>Process List</h2>
-    <span class="badge badge-blue">FULL PROCESSLIST</span>
-  </div>
-  <p class="section-desc">Active queries at collection time. Red rows = long-running or locked queries (&gt;30s or lock state).</p>
-  {{if .ProcessList}}
-  <div style="overflow-x:auto">
-  <table class="proc-table">
-    <thead><tr>
-      <th>ID</th><th>User</th><th>Host</th><th>DB</th>
-      <th>Command</th><th>Time (s)</th><th>State</th><th>Query</th>
-    </tr></thead>
-    <tbody>
-    {{range .ProcessList}}
-    <tr {{if .Alert}}class="alert-row"{{end}}>
-      <td>{{.ID}}</td>
-      <td>{{.User}}</td>
-      <td>{{.Host}}</td>
-      <td>{{.DB}}</td>
-      <td>{{.Command}}</td>
-      <td class="time-col">{{.Time}}</td>
-      <td>{{.State}}</td>
-      <td class="sql-col" title="{{.Info}}">{{.Info}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  </div>
-  {{else}}
-  <div class="no-data">No active processes (other than this connection).</div>
-  {{end}}
-</section>
-
-<!-- ── InnoDB Status ── -->
-<section class="section" id="innodb">
-  <div class="section-header">
-    <h2>InnoDB Engine Status</h2>
-    <span class="badge badge-blue">SHOW ENGINE INNODB STATUS</span>
-  </div>
-
-  <div class="tab-bar">
-    <button class="tab-btn active" onclick="switchTab(event,'innodb-kv')">Key Metrics</button>
-    <button class="tab-btn" onclick="switchTab(event,'innodb-raw-tab')">Raw Output</button>
-  </div>
-
-  <div id="innodb-kv" class="tab-pane active">
-    {{if .InnoDB.Sections}}
-    {{range .InnoDB.Sections}}
-    <div style="margin-bottom:16px">
-      <p style="font-size:12px;font-weight:600;color:var(--accent2);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.06em">{{.Title}}</p>
-      <table class="kv-table">
-        {{range .KVs}}
-        <tr {{if .Alert}}class="row-alert"{{end}}>
-          <td class="key-col">{{.Key}}</td>
-          <td class="val-col">{{.Value}}</td>
+    <!-- 1. System Summary & Engine Metrics -->
+    <h2 id="summary">1. System Summary</h2>
+    <table style="max-width: 800px; margin-bottom: 15px;">
+        <tr>
+            <th width="25%">Hostname</th>
+            <td><strong>{{.Summary.Hostname}}</strong></td>
+            <th width="20%">Collected At</th>
+            <td>{{.Summary.CollectedAt}}</td>
         </tr>
-        {{end}}
-      </table>
-    </div>
+        <tr>
+            <th>Server Version</th>
+            <td>{{.Summary.ServerVersion}}</td>
+            <th>Uptime</th>
+            <td>{{.Summary.Uptime}} ({{.Summary.UptimeSec}} s)</td>
+        </tr>
+        <tr>
+            <th>Database Host</th>
+            <td><code>{{.Summary.Host}}</code></td>
+            <th>Database Port</th>
+            <td><code>{{.Summary.Port}}</code></td>
+        </tr>
+        <tr>
+            <th>Database User</th>
+            <td><code>{{.Summary.User}}</code></td>
+            <th>Default Isolation</th>
+            <td>{{.Summary.TxnIsolation}}</td>
+        </tr>
+        <tr>
+            <th>Read Only status</th>
+            <td><strong>{{.Summary.ReadOnly}}</strong></td>
+            <th>Cluster Flow Control Status</th>
+            <td><strong style="color: #c53030;">{{.Summary.ClusterFlowControl}}</strong></td>
+        </tr>
+    </table>
+
+    <h3>📊 mysqladmin status Metrics</h3>
+    <table style="max-width: 800px; margin-bottom: 20px;">
+        <tr>
+            <th width="25%">Threads Connected</th>
+            <td>{{.Summary.Threads}}</td>
+            <th width="20%">Total Questions</th>
+            <td>{{.Summary.Questions}}</td>
+        </tr>
+        <tr>
+            <th>Slow Queries</th>
+            <td><strong style="color: #900;">{{.Summary.SlowQueries}}</strong></td>
+            <th>Opens</th>
+            <td>{{.Summary.Opens}}</td>
+        </tr>
+        <tr>
+            <th>Flush Tables</th>
+            <td>{{.Summary.FlushTables}}</td>
+            <th>Open Tables</th>
+            <td>{{.Summary.OpenTables}}</td>
+        </tr>
+        <tr>
+            <th>Queries Per Second Avg</th>
+            <td colspan="3"><strong>{{.Summary.QueriesPerSec}}</strong></td>
+        </tr>
+    </table>
+
+    <h3>📊 InnoDB Core Engine Metrics</h3>
+    <table style="max-width: 750px;">
+        <thead>
+            <tr>
+                <th width="65%">Metric Identifier</th>
+                <th>Telemetry Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .EngineMetrics}}
+            <tr>
+                <td><strong>{{.Key}}</strong></td>
+                <td>{{.Value}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2">No engine metrics collected.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 2. Critical Configurations -->
+    <h2 id="config">2. Critical Configurations (SHOW GLOBAL VARIABLES)</h2>
+    <p>Filter global configuration variables dynamically:</p>
+    <input type="text" id="config-search" class="search-box" placeholder="Filter variables..." onkeyup="filterTable('config-table', 'config-search')">
+    <table id="config-table">
+        <thead>
+            <tr>
+                <th width="40%">Configuration Parameter</th>
+                <th>Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .ConfigVariables}}
+            <tr>
+                <td><strong>{{.Key}}</strong></td>
+                <td>{{.Value}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2">No variable entries found.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 3. Performance Metrics (Global Status) -->
+    <h2 id="status">3. Performance Metrics (SHOW GLOBAL STATUS)</h2>
+    <p>Filter global status parameters dynamically:</p>
+    <input type="text" id="status-search" class="search-box" placeholder="Filter status..." onkeyup="filterTable('status-table', 'status-search')">
+    <table id="status-table">
+        <thead>
+            <tr>
+                <th width="40%">Status Variable</th>
+                <th>Current Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .StatusCounters}}
+            <tr>
+                <td><strong>{{.Key}}</strong></td>
+                <td>{{.Value}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2">No status counter entries found.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 4. Storage Engine State -->
+    <h2 id="innodb">4. Storage Engine State (SHOW ENGINE INNODB STATUS)</h2>
+    <pre>{{.InnodbStatus}}</pre>
+
+    <!-- 5. HA / Replication Topology Consolidated -->
+    <h2 id="replication">5. HA &amp; Replication Topology</h2>
+    
+    <h3>🧬 Replication Slave / Replica Channels Status</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Channel Name</th>
+                <th>IO Running</th>
+                <th>SQL Running</th>
+                <th>Source Host</th>
+                <th>Seconds Behind</th>
+                <th>Last IO Error</th>
+                <th>Last SQL Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .ReplicationStates}}
+            <tr>
+                <td><strong>{{.ChannelName}}</strong></td>
+                <td>{{.ReplicaIORunning}}</td>
+                <td>{{.ReplicaSQLRunning}}</td>
+                <td>{{.SourceHost}}</td>
+                <td><strong>{{.SecondsBehind}}</strong></td>
+                <td><small>{{.LastIOError}}</small></td>
+                <td><small>{{.LastSQLError}}</small></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7">No active replica replication states are configured.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>👥 Group Replication Members</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Channel Name</th>
+                <th>Member ID UUID</th>
+                <th>Member Host</th>
+                <th>Port</th>
+                <th>State</th>
+                <th>Role</th>
+                <th>Version</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .GroupMembers}}
+            <tr>
+                <td>{{.ChannelName}}</td>
+                <td><small>{{.MemberID}}</small></td>
+                <td><strong>{{.MemberHost}}</strong></td>
+                <td>{{.MemberPort}}</td>
+                <td>
+                    {{if eq .MemberState "ONLINE"}}
+                        <span class="badge badge-ok">ONLINE</span>
+                    {{else}}
+                        <span class="badge badge-critical">{{.MemberState}}</span>
+                    {{end}}
+                </td>
+                <td><strong>{{.MemberRole}}</strong></td>
+                <td>{{.Version}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7">No group replication members detected.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    {{if or .GRFlowControlLimit .GRQueues}}
+    <h3>📊 Group Replication Queues</h3>
+    {{if .GRFlowControlLimit}}
+    <p><strong>{{.GRFlowControlLimit}}</strong></p>
     {{end}}
+    <table>
+        <thead>
+            <tr>
+                <th>Member ID UUID</th>
+                <th>Certifier Queue Size (cert_queue)</th>
+                <th>Applier Queue Size (applier_queue)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .GRQueues}}
+            <tr>
+                <td><code>{{.MemberID}}</code></td>
+                <td><strong>{{.CertQueue}}</strong></td>
+                <td><strong>{{.ApplierQueue}}</strong></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="3">No active member stats queues registered.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    {{if or .GaleraFlowControl .GaleraStatus}}
+    <h3>🛡️ Galera / Percona XtraDB Cluster (PXC) Flow Control &amp; Status Checks</h3>
+    {{if .GaleraFlowControl}}
+    <p><strong>wsrep_flow_control_status:</strong> <code>{{.GaleraFlowControl}}</code></p>
+    {{end}}
+    
+    {{if .GaleraQueues.RecvQueue}}
+    <table style="max-width:650px; margin-bottom:15px;">
+        <thead>
+            <tr>
+                <th>Galera Recv Queue (local_recv_queue)</th>
+                <th>Galera Send Queue (local_send_queue)</th>
+                <th>Flow Control Paused Fraction (flow_control_paused)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>{{.GaleraQueues.RecvQueue}}</strong></td>
+                <td><strong>{{.GaleraQueues.SendQueue}}</strong></td>
+                <td><strong style="color: #900;">{{.GaleraQueues.FlowControlPaused}}</strong></td>
+            </tr>
+        </tbody>
+    </table>
+    {{end}}
+
+    <table>
+        <thead>
+            <tr>
+                <th>Galera Cluster Status Parameter</th>
+                <th>State Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .GaleraStatus}}
+            <tr>
+                <td><strong>{{.Key}}</strong></td>
+                <td><code>{{.Value}}</code></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2">No live Galera status variables found.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    {{if or .ClusterStatus .ClusterSetStatus .Routers}}
+    <h3>🛡️ InnoDB Clusters &amp; ClusterSet Metadata Details</h3>
+    {{if .ClusterStatus}}
+    <p>InnoDB Cluster Status (cluster.status):</p>
+    <pre>{{.ClusterStatus}}</pre>
+    {{end}}
+    
+    {{if .ClusterSetStatus}}
+    <p>InnoDB ClusterSet Status (myclusterset.status):</p>
+    <pre>{{.ClusterSetStatus}}</pre>
+    {{end}}
+
+    {{if .Routers}}
+    <p>Registered MySQLRouter (v2_routers &amp; options JOIN query details):</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Router ID</th>
+                <th>Router Name</th>
+                <th>Label</th>
+                <th>Address</th>
+                <th>Version</th>
+                <th>Last Check-In</th>
+                <th>Endpoints (RW/RO/RWX/ROX/Split)</th>
+                <th>Metadata User</th>
+                <th>Targets</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Routers}}
+            <tr>
+                <td><strong>{{.RouterID}}</strong></td>
+                <td>{{.RouterName}}</td>
+                <td><small>{{.RouterLabel}}</small></td>
+                <td><code>{{.Address}}</code></td>
+                <td>{{.Version}}</td>
+                <td><small>{{.LastCheckIn}}</small></td>
+                <td>
+                    <ul style="margin:0; padding-left:15px; font-family:monospace; font-size:10px;">
+                        <li>RW: {{.RWPort}}</li>
+                        <li>RO: {{.ROPort}}</li>
+                        <li>RWX: {{.RWXPort}}</li>
+                        <li>ROX: {{.ROXPort}}</li>
+                        <li>Split: {{.RWSplitPort}}</li>
+                    </ul>
+                </td>
+                <td><code>{{.MetadataUser}}</code></td>
+                <td><span class="badge badge-ok">{{.ReadOnlyTargets}}</span></td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{end}}
+    {{end}}
+
+    <!-- 6. Connected replica tracking -->
+    <h2 id="replica-source">6. Current Binary Log Status</h2>
+    <table style="max-width: 600px;">
+        <thead>
+            <tr>
+                <th>Coordinate Name</th>
+                <th>Current Position / File</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .MasterStatus}}
+            <tr>
+                <td><strong>{{.Key}}</strong></td>
+                <td>{{.Value}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2">Local binary logging parameters are inactive or master status is empty.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 7. Process List & Query History -->
+    <h2 id="process">7. Process List &amp; Query History</h2>
+    
+    <h3>🖥️ Active Connections Thread Status (SHOW FULL PROCESSLIST)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>User</th>
+                <th>Host IP Address</th>
+                <th>DB</th>
+                <th>Command</th>
+                <th>Time (s)</th>
+                <th>State</th>
+                <th>Executing Statement Info</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Processes}}
+            <tr>
+                <td>{{.ID}}</td>
+                <td><strong>{{.User}}</strong></td>
+                <td>{{.Host}}</td>
+                <td>{{.DB}}</td>
+                <td>{{.Command}}</td>
+                <td class="text-right"><strong>{{.Time}}</strong></td>
+                <td>{{.State}}</td>
+                <td><small>{{.Info}}</small></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="8">No active user connection threads detected.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>📈 Historical Statement Summary Digests (Top Query Stats)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Schema</th>
+                <th>Query sample</th>
+                <th>Executions</th>
+                <th>Total Exec (s)</th>
+                <th>Avg Exec (ms)</th>
+                <th>Total Lock (s)</th>
+                <th>Rows Examined</th>
+                <th>Rows Sent</th>
+                <th>Tmp Tables</th>
+                <th>Tmp Disk Tables</th>
+                <th>Sort Rows</th>
+                <th>No Index</th>
+                <th>No Good Index</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .DigestStats}}
+            <tr>
+                <td><strong>{{.SchemaName}}</strong></td>
+                <td><code>{{.QuerySample}}</code></td>
+                <td class="text-right">{{.ExecCount}}</td>
+                <td class="text-right"><strong>{{.TotalExecSec}} s</strong></td>
+                <td class="text-right">{{.AvgExecMs}} ms</td>
+                <td class="text-right"><strong>{{.TotalLockSec}} s</strong></td>
+                <td class="text-right">{{.RowsExamined}}</td>
+                <td class="text-right">{{.RowsSent}}</td>
+                <td class="text-right">{{.CreatedTmpTables}}</td>
+                <td class="text-right">{{.CreatedTmpDiskTables}}</td>
+                <td class="text-right">{{.SortRows}}</td>
+                <td class="text-right">{{.NoIndexUsed}}</td>
+                <td class="text-right">{{.NoGoodIndexUsed}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="13">No historical statement digests found in performance_schema.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>🔒 Lock Waits &amp; Blocking Transactions</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Wait Started</th>
+                <th>Age (s)</th>
+                <th>Locked Table</th>
+                <th>Index</th>
+                <th>Type</th>
+                <th>Waiting PID</th>
+                <th>Waiting Trx ID</th>
+                <th>Waiting Lock Mode</th>
+                <th>Waiting Query</th>
+                <th>Blocking PID</th>
+                <th>Blocking Trx ID</th>
+                <th>Blocking Lock Mode</th>
+                <th>Blocking Query</th>
+                <th>Kill Query Instruction</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .LockWaits}}
+            <tr>
+                <td>{{.WaitStarted}}</td>
+                <td class="text-right"><strong>{{.WaitAgeSecs}}</strong></td>
+                <td><code>{{.LockedTable}}</code></td>
+                <td>{{.LockedIndex}}</td>
+                <td>{{.LockedType}}</td>
+                <td>{{.WaitingPid}}</td>
+                <td>{{.WaitingTrxId}}</td>
+                <td>{{.WaitingLockMode}}</td>
+                <td><small>{{.WaitingQuery}}</small></td>
+                <td><strong>{{.BlockingPid}}</strong></td>
+                <td>{{.BlockingTrxId}}</td>
+                <td>{{.BlockingLockMode}}</td>
+                <td><small>{{.BlockingQuery}}</small></td>
+                <td><code><strong style="color: red;">{{.SQLKillBlockingConnection}}</strong></code></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="14">No current record locking bottlenecks or waits reported.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 8. Major Performance Schema Insights -->
+    <h2 id="perf-schema">8. Performance Schema Insights</h2>
+    
+    <h3>💾 Live System memory usage</h3>
+    <table style="max-width: 650px;">
+        <thead>
+            <tr>
+                <th>Memory Allocation Event Key</th>
+                <th>Allocated Space</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .MemoryEvents}}
+            <tr>
+                <td><strong>{{.EventName}}</strong></td>
+                <td>{{.CurrentAlloc}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2">No memory details returned.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>⏳ Critical Event Wait Summary</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Wait Event Identifier</th>
+                <th>Occurrence Count</th>
+                <th>Total Delay Seconds</th>
+                <th>Average Delay Wait (ms)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .WaitEvents}}
+            <tr>
+                <td><strong>{{.EventName}}</strong></td>
+                <td>{{.CountStar}}</td>
+                <td><strong>{{.TotalWaitSec}} s</strong></td>
+                <td>{{.AvgWaitMs}} ms</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="4">No delay wait occurrences tracked.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>💿 Active Disk File IO Latency Profile</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>IO Operation Event</th>
+                <th>Total Reads</th>
+                <th>Total Writes</th>
+                <th>MB Read</th>
+                <th>MB Written</th>
+                <th>Read Latency (s)</th>
+                <th>Write Latency (s)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .FileIOEvents}}
+            <tr>
+                <td><strong>{{.EventName}}</strong></td>
+                <td>{{.CountRead}}</td>
+                <td>{{.CountWrite}}</td>
+                <td>{{.MBRead}} MB</td>
+                <td>{{.MBWritten}} MB</td>
+                <td>{{.ReadLatency}} s</td>
+                <td>{{.WriteLatency}} s</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7">No active file IO operations registered.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 10. Recommendations -->
+    <h2 id="recommendations">10. Optimization Recommendations</h2>
+    <p>Automated database diagnostic evaluations assessed against current active metrics:</p>
+    
+    {{range .Recommendations}}
+    <div class="recommendation-card rec-{{.Type}}">
+        <p><strong>[{{.Type}}] {{.Parameter}}</strong></p>
+        <p style="margin: 0;">{{.Description}}</p>
+    </div>
     {{else}}
-    <div class="no-data">No structured sections extracted from InnoDB status.</div>
+    <p>No operational mismatches or threshold flags detected on this collection run.</p>
     {{end}}
-  </div>
 
-  <div id="innodb-raw-tab" class="tab-pane">
-    <div class="innodb-raw">
-      <div class="innodb-raw-header">
-        <span>Raw INNODB STATUS output</span>
-        <input class="innodb-search" type="text" placeholder="Search..." id="innodbSearch" oninput="highlightSearch()">
-      </div>
-      <pre class="innodb-pre" id="innodbPre">{{.InnoDB.Raw}}</pre>
-    </div>
-  </div>
-</section>
+    <footer>
+        <p>MySQL Gather Diagnostic Report | Inspired by the pg_gather philosophy for clean, rapid DB checks.</p>
+    </footer>
 
-<!-- ── Wait Events ── -->
-<section class="section" id="waits">
-  <div class="section-header">
-    <h2>Wait Events</h2>
-    <span class="badge badge-blue">performance_schema</span>
-  </div>
-  <p class="section-desc">Top wait events by total wait time. High total_wait_sec may indicate I/O pressure or lock contention.</p>
-  {{if .WaitEvents}}
-  <table class="kv-table">
-    <thead><tr>
-      <th>Wait Event</th>
-      <th style="text-align:right">Occurrences</th>
-      <th style="text-align:right">Total Wait (s)</th>
-      <th style="text-align:right">Avg Wait (ms)</th>
-    </tr></thead>
-    <tbody>
-    {{range .WaitEvents}}
-    <tr {{if .Alert}}class="row-alert"{{end}}>
-      <td class="text-mono" style="font-size:12px">{{.Event}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.Count}}</td>
-      <td style="text-align:right;font-family:var(--font-mono);{{if .Alert}}color:var(--red){{end}}">{{.TotalSec}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.AvgMS}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <div class="no-data">No wait event data available (performance_schema may be disabled).</div>
-  {{end}}
-</section>
+    <script>
+        function filterTable(tableId, inputId) {
+            var input = document.getElementById(inputId);
+            var filter = input.value.toUpperCase();
+            var table = document.getElementById(tableId);
+            if (!table) return;
+            var trs = table.getElementsByTagName("tr");
 
-<!-- ── File I/O ── -->
-<section class="section" id="fileio">
-  <div class="section-header">
-    <h2>File I/O Summary</h2>
-    <span class="badge badge-blue">performance_schema</span>
-  </div>
-  {{if .FileIO}}
-  <div style="overflow-x:auto">
-  <table class="kv-table">
-    <thead><tr>
-      <th>I/O Event</th>
-      <th style="text-align:right">Reads</th>
-      <th style="text-align:right">Writes</th>
-      <th style="text-align:right">MB Read</th>
-      <th style="text-align:right">MB Written</th>
-      <th style="text-align:right">Read Lat (s)</th>
-      <th style="text-align:right">Write Lat (s)</th>
-    </tr></thead>
-    <tbody>
-    {{range .FileIO}}
-    <tr>
-      <td class="text-mono" style="font-size:12px">{{.Event}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.Reads}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.Writes}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.MBRead}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.MBWritten}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.ReadLatency}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.WriteLatency}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  </div>
-  {{else}}
-  <div class="no-data">No file I/O data available.</div>
-  {{end}}
-</section>
-
-<!-- ── Memory ── -->
-<section class="section" id="memory">
-  <div class="section-header">
-    <h2>Memory Usage</h2>
-    <span class="badge badge-blue">sys.memory_global_by_current_bytes</span>
-  </div>
-  <p class="section-desc">Current memory allocation by component. GiB-level allocations are highlighted.</p>
-  {{if .Memory}}
-  <table class="kv-table">
-    <thead><tr>
-      <th>Event / Component</th>
-      <th style="text-align:right">Current Allocation</th>
-    </tr></thead>
-    <tbody>
-    {{range .Memory}}
-    <tr {{if .Alert}}class="row-warn"{{end}}>
-      <td class="text-mono" style="font-size:12px">{{.EventName}}</td>
-      <td style="text-align:right;font-family:var(--font-mono);{{if .Alert}}color:var(--orange);font-weight:600{{end}}">{{.CurrentAlloc}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <div class="no-data">Memory data unavailable (sys schema may be missing or performance_schema disabled).</div>
-  {{end}}
-</section>
-
-<!-- ── CPU Queries ── -->
-<section class="section" id="cpu-queries">
-  <div class="section-header">
-    <h2>Top CPU Queries</h2>
-    <span class="badge badge-blue">events_statements_summary_by_digest</span>
-  </div>
-  <p class="section-desc">Queries ordered by total CPU time consumed since server start.</p>
-  {{if .CPUQueries}}
-  <table class="kv-table">
-    <thead><tr>
-      <th>Query Digest</th>
-      <th style="text-align:right">Executions</th>
-      <th style="text-align:right">Total CPU (s)</th>
-      <th style="text-align:right">Avg CPU (ms)</th>
-    </tr></thead>
-    <tbody>
-    {{range .CPUQueries}}
-    <tr>
-      <td class="text-mono" style="font-size:11px;max-width:500px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{.Query}}">{{.Query}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.Executions}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.TotalCPU}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.AvgCPUMS}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <div class="no-data">No CPU query data available.</div>
-  {{end}}
-</section>
-
-<!-- ── Table I/O ── -->
-<section class="section" id="tableio">
-  <div class="section-header">
-    <h2>Table I/O Waits</h2>
-    <span class="badge badge-blue">table_io_waits_summary_by_table</span>
-  </div>
-  {{if .TableIO}}
-  <table class="kv-table">
-    <thead><tr>
-      <th>Schema</th>
-      <th>Table</th>
-      <th style="text-align:right">Reads</th>
-      <th style="text-align:right">Writes</th>
-      <th style="text-align:right">Read Lat (s)</th>
-      <th style="text-align:right">Write Lat (s)</th>
-    </tr></thead>
-    <tbody>
-    {{range .TableIO}}
-    <tr>
-      <td class="text-mono" style="font-size:12px;color:var(--text3)">{{.Schema}}</td>
-      <td class="text-mono" style="font-size:12px">{{.Table}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.Reads}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.Writes}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.LatencyRead}}</td>
-      <td style="text-align:right;font-family:var(--font-mono)">{{.LatencyWrite}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <div class="no-data">No table I/O data available.</div>
-  {{end}}
-</section>
-
-<!-- ── Lock Activity ── -->
-<section class="section" id="locks">
-  <div class="section-header">
-    <h2>Lock Activity</h2>
-    <span class="badge badge-blue">information_schema.innodb_trx</span>
-  </div>
-  {{if .Locks}}
-  <div class="alert-banner">⚠ Active lock waits detected!</div>
-  <table class="kv-table">
-    <thead><tr>
-      <th>Waiting Query</th>
-      <th>Waiting Thread</th>
-      <th>Blocking Thread</th>
-      <th>Blocking Query</th>
-      <th>Lock Type</th>
-    </tr></thead>
-    <tbody>
-    {{range .Locks}}
-    <tr class="row-alert">
-      <td class="text-mono" style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">{{.WaitingQuery}}</td>
-      <td class="text-mono">{{.WaitingThread}}</td>
-      <td class="text-mono">{{.BlockingThread}}</td>
-      <td class="text-mono" style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">{{.BlockingQuery}}</td>
-      <td class="text-mono">{{.LockMode}}</td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <div class="no-data"><span class="status-dot dot-green"></span>No active lock waits detected.</div>
-  {{end}}
-</section>
-
-</main>
-
-<script>
-// Tab switching
-function switchTab(e, id) {
-  const section = e.target.closest('section') || document.body;
-  section.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  section.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-  e.target.classList.add('active');
-  document.getElementById(id).classList.add('active');
-}
-
-// InnoDB search highlight
-function highlightSearch() {
-  const q = document.getElementById('innodbSearch').value;
-  const pre = document.getElementById('innodbPre');
-  const raw = pre.textContent;
-  if (!q) { pre.innerHTML = escapeHtml(raw); return; }
-  const re = new RegExp(escapeRe(q), 'gi');
-  pre.innerHTML = escapeHtml(raw).replace(re.source, m => '<mark>' + m + '</mark>');
-}
-function escapeHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-function escapeRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Sidebar active link
-const links = document.querySelectorAll('#sidebar nav a');
-const sections = document.querySelectorAll('.section');
-const obs = new IntersectionObserver(entries => {
-  entries.forEach(e => {
-    if (e.isIntersecting) {
-      links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id));
-    }
-  });
-}, { threshold: 0.2, rootMargin: '-80px 0px -80px 0px' });
-sections.forEach(s => obs.observe(s));
-
-// Store raw InnoDB text after DOM load for search
-window.addEventListener('DOMContentLoaded', () => {
-  const pre = document.getElementById('innodbPre');
-  if (pre) pre.dataset.raw = pre.textContent;
-});
-document.getElementById('innodbSearch').addEventListener('input', function() {
-  const q = this.value.trim();
-  const pre = document.getElementById('innodbPre');
-  const raw = pre.dataset.raw || pre.textContent;
-  if (!q) { pre.innerHTML = escapeHtml(raw); return; }
-  const re = new RegExp(escapeRe(q), 'gi');
-  pre.innerHTML = escapeHtml(raw).replace(re, m => '<mark>' + m + '</mark>');
-});
-</script>
+            for (var i = 1; i < trs.length; i++) {
+                var match = false;
+                var tds = trs[i].getElementsByTagName("td");
+                for (var j = 0; j < tds.length; j++) {
+                    if (tds[j]) {
+                        var textVal = tds[j].textContent || tds[j].innerText;
+                        if (textVal.toUpperCase().indexOf(filter) > -1) {
+                            match = true;
+                            break;
+                        }
+                    }
+                }
+                trs[i].style.display = match ? "" : "none";
+            }
+        }
+    </script>
 </body>
 </html>`
