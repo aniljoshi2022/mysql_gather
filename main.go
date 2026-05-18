@@ -14,8 +14,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// dev
-
 // SummaryInfo holds basic server metadata, including mysqladmin status metrics
 type SummaryInfo struct {
 	Hostname           string
@@ -171,6 +169,69 @@ type LockWait struct {
 	SQLKillBlockingConnection string
 }
 
+// SchemaTableLockWait holds raw metadata lock wait coordinates from sys.schema_table_lock_waits
+type SchemaTableLockWait struct {
+	ObjectSchema              string
+	ObjectName                string
+	WaitingPid                string
+	WaitingLockType           string
+	WaitingQuery              string
+	WaitingQuerySecs          string
+	BlockingPid               string
+	BlockingLockType          string
+	SQLKillBlockingConnection string
+}
+
+// DDLLock holds dynamic metadata lock waits from sys.schema_table_lock_waits JOIN events_statements_history
+type DDLLock struct {
+	BlockingPid      string
+	ObjectSchema     string
+	ObjectName       string
+	BlockingThreadID string
+	SQLQuery         string
+}
+
+// InnodbTrx holds active transaction details from information_schema.innodb_trx
+type InnodbTrx struct {
+	TrxID             string
+	TrxState          string
+	TrxStarted        string
+	TrxWaitStarted    string
+	TrxWeight         string
+	TrxMysqlThreadID  string
+	TrxQuery          string
+	TrxOperation      string
+	TrxTablesInUse    string
+	TrxTablesLocked   string
+	TrxLockStructs    string
+	TrxRowsLocked     string
+	TrxRowsModified   string
+	TrxIsolationLevel string
+}
+
+// PfsThread holds background and foreground thread details from performance_schema.threads
+type PfsThread struct {
+	ThreadID    string
+	Name        string
+	Type        string
+	ProcesslistID   string
+	ProcesslistUser string
+	ProcesslistHost string
+	ProcesslistDB   string
+	ProcesslistCommand string
+	ProcesslistTime string
+	ProcesslistState string
+	ProcesslistInfo string
+}
+
+// UserDetail holds MySQL account details from mysql.user
+type UserDetail struct {
+	User            string
+	Host            string
+	Plugin          string
+	PasswordExpired string
+}
+
 // Recommendation holds an automated advice item based on current configurations or statuses
 type Recommendation struct {
 	Type        string // CRITICAL, WARNING, INFO
@@ -180,31 +241,36 @@ type Recommendation struct {
 
 // PageData holds all variables injected into the HTML template
 type PageData struct {
-	Summary            SummaryInfo
-	EngineMetrics      []KeyVal
-	ConfigVariables    []KeyVal
-	StatusCounters     []KeyVal
-	Processes          []ProcessInfo
-	GroupMembers       []GroupMember
-	ReplicationStates  []ReplicationStatus
-	GRQueues           []GRMemberStats
-	GRFlowControlLimit string
-	GaleraStatus       []KeyVal
-	GaleraFlowControl  string
-	GaleraQueues       GaleraQueueStats
-	MasterStatus       []KeyVal
-	InnodbStatus       string
-	MemoryEvents       []MemoryEvent
-	WaitEvents         []WaitEvent
-	FileIOEvents       []FileIOEvent
-	ClusterStatus      string
-	ClusterSetStatus   string
-	RouterList         string
-	RouterOptions      string
-	Routers            []RouterDetails
-	DigestStats        []DigestStat
-	LockWaits          []LockWait
-	Recommendations    []Recommendation
+	Summary              SummaryInfo
+	EngineMetrics        []KeyVal
+	ConfigVariables      []KeyVal
+	StatusCounters       []KeyVal
+	Processes            []ProcessInfo
+	GroupMembers         []GroupMember
+	ReplicationStates    []ReplicationStatus
+	GRQueues             []GRMemberStats
+	GRFlowControlLimit   string
+	GaleraStatus         []KeyVal
+	GaleraFlowControl    string
+	GaleraQueues         GaleraQueueStats
+	MasterStatus         []KeyVal
+	InnodbStatus         string
+	MemoryEvents         []MemoryEvent
+	WaitEvents           []WaitEvent
+	FileIOEvents         []FileIOEvent
+	ClusterStatus        string
+	ClusterSetStatus     string
+	RouterList           string
+	RouterOptions        string
+	Routers              []RouterDetails
+	DigestStats          []DigestStat
+	LockWaits            []LockWait
+	SchemaTableLockWaits []SchemaTableLockWait
+	DDLLocks             []DDLLock
+	InnodbTrx            []InnodbTrx
+	PfsThreads           []PfsThread
+	UserDetails          []UserDetail
+	Recommendations      []Recommendation
 }
 
 // Format bytes into human-readable MB/GB strings where applicable
@@ -439,6 +505,9 @@ func main() {
 
 	// Section 1: Consolidated Engine Metrics (Union All query as requested)
 	metricsQuery := `
+		SELECT 'Checkpoint Age' AS Metric, ROUND(COUNT / 1024 / 1024, 2) AS Value
+		FROM information_schema.innodb_metrics WHERE NAME = 'log_lsn_checkpoint_age'
+		UNION ALL
 		SELECT 'History list length' AS Metric, COUNT AS Value 
 		FROM information_schema.innodb_metrics WHERE NAME = 'trx_rseg_history_len'
 		UNION ALL
@@ -722,7 +791,7 @@ func main() {
 	// Final Router metadata extraction using dynamic JOIN queries
 	data.Routers = queryRouterMetadata(db)
 
-	// Section 6: Connected replica tracking
+	// Section 6: Current Binary Log Status
 	binlogRows, bErr := db.Query("SHOW BINARY LOG STATUS;")
 	if bErr != nil {
 		binlogRows, bErr = db.Query("SHOW MASTER STATUS;")
@@ -839,6 +908,139 @@ func main() {
 				&l.SQLKillBlockingConnection,
 			); err == nil {
 				data.LockWaits = append(data.LockWaits, l)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 7 (Continued): DDL & Schema lock waits (sys.schema_table_lock_waits + events_statements_history JOIN)
+	var ddlTableExists int
+	_ = db.QueryRow(`
+		SELECT COUNT(*) 
+		FROM information_schema.tables 
+		WHERE TABLE_SCHEMA = 'sys' AND TABLE_NAME = 'schema_table_lock_waits'
+	`).Scan(&ddlTableExists)
+
+	if ddlTableExists > 0 {
+		// 1. Fetch raw lock waits details (such as waiting vs blocking coordinates)
+		rawLockQuery := `
+			SELECT 
+				IFNULL(object_schema, ''), 
+				IFNULL(object_name, ''), 
+				IFNULL(waiting_pid, 0), 
+				IFNULL(waiting_lock_type, ''), 
+				IFNULL(waiting_query, ''), 
+				IFNULL(waiting_query_secs, 0), 
+				IFNULL(blocking_pid, 0), 
+				IFNULL(blocking_lock_type, ''), 
+				IFNULL(sql_kill_blocking_connection, '') 
+			FROM sys.schema_table_lock_waits;`
+		if rows, err := db.Query(rawLockQuery); err == nil {
+			for rows.Next() {
+				var s SchemaTableLockWait
+				if err := rows.Scan(&s.ObjectSchema, &s.ObjectName, &s.WaitingPid, &s.WaitingLockType, &s.WaitingQuery, &s.WaitingQuerySecs, &s.BlockingPid, &s.BlockingLockType, &s.SQLKillBlockingConnection); err == nil {
+					data.SchemaTableLockWaits = append(data.SchemaTableLockWaits, s)
+				}
+			}
+			rows.Close()
+		}
+
+		// 2. Fetch blocking statement execution query history
+		ddlQuery := `
+			SELECT 
+				stlw.blocking_pid, 
+				IFNULL(stlw.object_schema, ''), 
+				IFNULL(stlw.object_name, ''), 
+				stlw.blocking_thread_id, 
+				IFNULL(GROUP_CONCAT(esh.sql_text SEPARATOR '\n'), '') AS sql_query 
+			FROM sys.schema_table_lock_waits AS stlw 
+			LEFT JOIN performance_schema.events_statements_history AS esh 
+				ON stlw.blocking_thread_id = esh.THREAD_ID 
+			GROUP BY stlw.blocking_pid, stlw.object_schema, stlw.object_name, stlw.blocking_thread_id;`
+		
+		if rows, err := db.Query(ddlQuery); err == nil {
+			for rows.Next() {
+				var d DDLLock
+				if err := rows.Scan(&d.BlockingPid, &d.ObjectSchema, &d.ObjectName, &d.BlockingThreadID, &d.SQLQuery); err == nil {
+					data.DDLLocks = append(data.DDLLocks, d)
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	// Section 7 (Continued): Active Transactions from information_schema.innodb_trx
+	trxQuery := `
+		SELECT
+			trx_id,
+			trx_state,
+			trx_started,
+			IFNULL(trx_wait_started, '') AS trx_wait_started,
+			trx_weight,
+			trx_mysql_thread_id,
+			IFNULL(LEFT(trx_query, 120), '') AS trx_query,
+			IFNULL(trx_operation_state, '') AS trx_operation_state,
+			trx_tables_in_use,
+			trx_tables_locked,
+			trx_lock_structs,
+			trx_rows_locked,
+			trx_rows_modified,
+			trx_isolation_level
+		FROM information_schema.innodb_trx
+		ORDER BY trx_started ASC;`
+	if rows, err := db.Query(trxQuery); err == nil {
+		for rows.Next() {
+			var t InnodbTrx
+			if err := rows.Scan(
+				&t.TrxID, &t.TrxState, &t.TrxStarted, &t.TrxWaitStarted,
+				&t.TrxWeight, &t.TrxMysqlThreadID, &t.TrxQuery, &t.TrxOperation,
+				&t.TrxTablesInUse, &t.TrxTablesLocked, &t.TrxLockStructs,
+				&t.TrxRowsLocked, &t.TrxRowsModified, &t.TrxIsolationLevel,
+			); err == nil {
+				data.InnodbTrx = append(data.InnodbTrx, t)
+			}
+		}
+		rows.Close()
+	}
+
+	// Section 8 (Continued): Performance Schema Threads
+	pfsThreadQuery := `
+		SELECT
+			THREAD_ID,
+			NAME,
+			TYPE,
+			IFNULL(PROCESSLIST_ID, '') AS PROCESSLIST_ID,
+			IFNULL(PROCESSLIST_USER, '') AS PROCESSLIST_USER,
+			IFNULL(PROCESSLIST_HOST, '') AS PROCESSLIST_HOST,
+			IFNULL(PROCESSLIST_DB, '') AS PROCESSLIST_DB,
+			IFNULL(PROCESSLIST_COMMAND, '') AS PROCESSLIST_COMMAND,
+			IFNULL(PROCESSLIST_TIME, '') AS PROCESSLIST_TIME,
+			IFNULL(PROCESSLIST_STATE, '') AS PROCESSLIST_STATE,
+			IFNULL(LEFT(PROCESSLIST_INFO, 100), '') AS PROCESSLIST_INFO
+		FROM performance_schema.threads
+		ORDER BY TYPE, THREAD_ID;`
+	if rows, err := db.Query(pfsThreadQuery); err == nil {
+		for rows.Next() {
+			var t PfsThread
+			if err := rows.Scan(
+				&t.ThreadID, &t.Name, &t.Type,
+				&t.ProcesslistID, &t.ProcesslistUser, &t.ProcesslistHost,
+				&t.ProcesslistDB, &t.ProcesslistCommand, &t.ProcesslistTime,
+				&t.ProcesslistState, &t.ProcesslistInfo,
+			); err == nil {
+				data.PfsThreads = append(data.PfsThreads, t)
+			}
+		}
+		rows.Close()
+	}
+
+	// User Details from mysql.user
+	userQuery := `SELECT User, Host, plugin, password_expired FROM mysql.user ORDER BY User, Host;`
+	if rows, err := db.Query(userQuery); err == nil {
+		for rows.Next() {
+			var u UserDetail
+			if err := rows.Scan(&u.User, &u.Host, &u.Plugin, &u.PasswordExpired); err == nil {
+				data.UserDetails = append(data.UserDetails, u)
 			}
 		}
 		rows.Close()
@@ -1290,6 +1492,7 @@ const htmlTemplate = `<!DOCTYPE html>
             <li><a href="#replica-source">6. Current Binary Log Status</a></li>
             <li><a href="#process">7. Process List &amp; Query History</a></li>
             <li><a href="#perf-schema">8. Performance Schema Insights</a></li>
+            <li><a href="#user-details">9. User Details</a></li>
             <li><a href="#recommendations">10. Optimization Recommendations</a></li>
         </ul>
     </div>
@@ -1398,7 +1601,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <!-- 3. Performance Metrics (Global Status) -->
+    <!-- 3. Performance Metrics -->
     <h2 id="status">3. Performance Metrics (SHOW GLOBAL STATUS)</h2>
     <p>Filter global status parameters dynamically:</p>
     <input type="text" id="status-search" class="search-box" placeholder="Filter status..." onkeyup="filterTable('status-table', 'status-search')">
@@ -1483,8 +1686,8 @@ const htmlTemplate = `<!DOCTYPE html>
                         <span class="badge badge-ok">ONLINE</span>
                     {{else}}
                         <span class="badge badge-critical">{{.MemberState}}</span>
-                    {{end}}
-                </td>
+                    </td>
+                {{end}}
                 <td><strong>{{.MemberRole}}</strong></td>
                 <td>{{.Version}}</td>
             </tr>
@@ -1579,7 +1782,7 @@ const htmlTemplate = `<!DOCTYPE html>
     {{end}}
 
     {{if .Routers}}
-    <p>Registered MySQLRouter (v2_routers &amp; options JOIN query details):</p>
+    <h3>🛡️ Registered MySQLRouter</h3>
     <table>
         <thead>
             <tr>
@@ -1621,7 +1824,7 @@ const htmlTemplate = `<!DOCTYPE html>
     {{end}}
     {{end}}
 
-    <!-- 6. Connected replica tracking -->
+    <!-- 6. Current Binary Log Status -->
     <h2 id="replica-source">6. Current Binary Log Status</h2>
     <table style="max-width: 600px;">
         <thead>
@@ -1763,10 +1966,148 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
+    <h3>🔒 MDL &amp; DDL Lock Waits</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Object Schema</th>
+                <th>Object Name</th>
+                <th>Waiting PID</th>
+                <th>Waiting Lock Type</th>
+                <th>Waiting Query</th>
+                <th>Wait (s)</th>
+                <th>Blocking PID</th>
+                <th>Blocking Lock Type</th>
+                <th>Kill Instruction</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .SchemaTableLockWaits}}
+            <tr>
+                <td><strong>{{.ObjectSchema}}</strong></td>
+                <td><code>{{.ObjectName}}</code></td>
+                <td>{{.WaitingPid}}</td>
+                <td><span class="badge badge-warning">{{.WaitingLockType}}</span></td>
+                <td><small>{{.WaitingQuery}}</small></td>
+                <td class="text-right"><strong>{{.WaitingQuerySecs}}</strong></td>
+                <td><strong>{{.BlockingPid}}</strong></td>
+                <td><span class="badge badge-critical">{{.BlockingLockType}}</span></td>
+                <td><code><strong style="color: red;">{{.SQLKillBlockingConnection}}</strong></code></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="9">No metadata lock waits currently detected.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    {{if .DDLLocks}}
+    <h3>🔒 Blocking Session SQL History</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Blocking PID</th>
+                <th>Object Schema</th>
+                <th>Object Name</th>
+                <th>Blocking Thread ID</th>
+                <th>Active Blocking SQL Queries History</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .DDLLocks}}
+            <tr>
+                <td><strong>{{.BlockingPid}}</strong></td>
+                <td>{{.ObjectSchema}}</td>
+                <td><code>{{.ObjectName}}</code></td>
+                <td>{{.BlockingThreadID}}</td>
+                <td><pre style="margin: 0; padding: 4px; font-size: 10px; max-height: 100px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">{{.SQLQuery}}</pre></td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    <h3>⚡ Active Transactions (information_schema.innodb_trx)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Trx ID</th>
+                <th>State</th>
+                <th>Started</th>
+                <th>Wait Started</th>
+                <th>Thread ID</th>
+                <th>Isolation</th>
+                <th>Tables In Use</th>
+                <th>Tables Locked</th>
+                <th>Lock Structs</th>
+                <th>Rows Locked</th>
+                <th>Rows Modified</th>
+                <th>Query</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .InnodbTrx}}
+            <tr>
+                <td><code>{{.TrxID}}</code></td>
+                <td><span class="badge {{if eq .TrxState "RUNNING"}}badge-ok{{else if eq .TrxState "LOCK WAIT"}}badge-critical{{else}}badge-warning{{end}}">{{.TrxState}}</span></td>
+                <td>{{.TrxStarted}}</td>
+                <td>{{.TrxWaitStarted}}</td>
+                <td>{{.TrxMysqlThreadID}}</td>
+                <td><small>{{.TrxIsolationLevel}}</small></td>
+                <td class="text-right">{{.TrxTablesInUse}}</td>
+                <td class="text-right"><strong>{{.TrxTablesLocked}}</strong></td>
+                <td class="text-right">{{.TrxLockStructs}}</td>
+                <td class="text-right"><strong>{{.TrxRowsLocked}}</strong></td>
+                <td class="text-right">{{.TrxRowsModified}}</td>
+                <td><small>{{.TrxQuery}}</small></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="12">No active InnoDB transactions currently running.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
     <!-- 8. Major Performance Schema Insights -->
     <h2 id="perf-schema">8. Performance Schema Insights</h2>
+
+    <h3>🧵 Performance Schema Threads</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Thread ID</th>
+                <th>Name</th>
+                <th>Type</th>
+                <th>PID</th>
+                <th>User</th>
+                <th>Host</th>
+                <th>DB</th>
+                <th>Command</th>
+                <th>Time (s)</th>
+                <th>State</th>
+                <th>Info</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .PfsThreads}}
+            <tr>
+                <td>{{.ThreadID}}</td>
+                <td><small>{{.Name}}</small></td>
+                <td><span class="badge {{if eq .Type "FOREGROUND"}}badge-ok{{else}}badge-warning{{end}}">{{.Type}}</span></td>
+                <td>{{.ProcesslistID}}</td>
+                <td><strong>{{.ProcesslistUser}}</strong></td>
+                <td>{{.ProcesslistHost}}</td>
+                <td>{{.ProcesslistDB}}</td>
+                <td>{{.ProcesslistCommand}}</td>
+                <td class="text-right">{{.ProcesslistTime}}</td>
+                <td>{{.ProcesslistState}}</td>
+                <td><small>{{.ProcesslistInfo}}</small></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="11">No thread data returned from performance_schema.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
     
-    <h3>💾 Live System memory usage</h3>
+    <h3>Live System memory usage</h3>
     <table style="max-width: 650px;">
         <thead>
             <tr>
@@ -1786,7 +2127,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <h3>⏳ Critical Event Wait Summary</h3>
+    <h3>Critical Event Wait Summary</h3>
     <table>
         <thead>
             <tr>
@@ -1810,7 +2151,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <h3>💿 Active Disk File IO Latency Profile</h3>
+    <h3>Active Disk File IO Latency Profile</h3>
     <table>
         <thead>
             <tr>
@@ -1836,6 +2177,37 @@ const htmlTemplate = `<!DOCTYPE html>
             </tr>
             {{else}}
             <tr><td colspan="7">No active file IO operations registered.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 9. User Details -->
+    <h2 id="user-details">9. User Details</h2>
+    <table style="max-width: 750px;">
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Host</th>
+                <th>Auth Plugin</th>
+                <th>Password Expired</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .UserDetails}}
+            <tr>
+                <td><strong>{{.User}}</strong></td>
+                <td><code>{{.Host}}</code></td>
+                <td>{{.Plugin}}</td>
+                <td>
+                    {{if eq .PasswordExpired "Y"}}
+                        <span class="badge badge-critical">YES</span>
+                    {{else}}
+                        <span class="badge badge-ok">NO</span>
+                    {{end}}
+                </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="4">No user records returned from mysql.user.</td></tr>
             {{end}}
         </tbody>
     </table>
