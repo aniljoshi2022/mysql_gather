@@ -91,6 +91,14 @@ type GaleraQueueStats struct {
 	FlowControlPaused string
 }
 
+// GaleraSummary holds the key PXC cluster identity and status fields
+type GaleraSummary struct {
+	ClusterName       string
+	ClusterSize       string
+	ClusterStatus     string
+	IncomingAddresses string
+}
+
 // RouterDetails represents the structured router records parsed from the custom metadata join query
 type RouterDetails struct {
 	RouterID        string
@@ -250,7 +258,7 @@ type PageData struct {
 	ReplicationStates    []ReplicationStatus
 	GRQueues             []GRMemberStats
 	GRFlowControlLimit   string
-	GaleraStatus         []KeyVal
+	GaleraSummary        GaleraSummary
 	GaleraFlowControl    string
 	GaleraQueues         GaleraQueueStats
 	MasterStatus         []KeyVal
@@ -731,16 +739,35 @@ func main() {
 	galeraQuery := `
 		SELECT VARIABLE_NAME, VARIABLE_VALUE 
 		FROM performance_schema.global_status 
-		WHERE VARIABLE_NAME in ('wsrep_incoming_addresses','wsrep_cluster_size','wsrep_cluster_status');`
+		WHERE VARIABLE_NAME IN (
+			'wsrep_cluster_size','wsrep_cluster_status','wsrep_incoming_addresses');`
 	if rows, err := db.Query(galeraQuery); err == nil {
 		for rows.Next() {
-			var kv KeyVal
-			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
-				data.GaleraStatus = append(data.GaleraStatus, kv)
+			var k, v string
+			if err := rows.Scan(&k, &v); err == nil {
+				switch k {
+				case "wsrep_cluster_size":
+					data.GaleraSummary.ClusterSize = v
+				case "wsrep_cluster_status":
+					data.GaleraSummary.ClusterStatus = v
+				case "wsrep_incoming_addresses":
+					data.GaleraSummary.IncomingAddresses = v
+				}
 				isClusterConfigured = true
 			}
 		}
 		rows.Close()
+	}
+
+	// wsrep_cluster_name lives in global_variables, not global_status
+	clusterNameQuery := `
+		SELECT VARIABLE_VALUE FROM performance_schema.global_variables
+		WHERE VARIABLE_NAME = 'wsrep_cluster_name';`
+	if row := db.QueryRow(clusterNameQuery); row != nil {
+		var name string
+		if err := row.Scan(&name); err == nil {
+			data.GaleraSummary.ClusterName = name
+		}
 	}
 
 	// Final Summary Cluster Flow Control assignment
@@ -1532,7 +1559,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tr>
     </table>
 
-    <h3>📊 mysqladmin status Metrics</h3>
+    <h3>mysqladmin Status Metrics</h3>
     <table style="max-width: 800px; margin-bottom: 20px;">
         <tr>
             <th width="25%">Threads Connected</th>
@@ -1558,7 +1585,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tr>
     </table>
 
-    <h3>📊 InnoDB Core Engine Metrics</h3>
+    <h3>InnoDB Core Engine Metrics</h3>
     <table style="max-width: 750px;">
         <thead>
             <tr>
@@ -1631,7 +1658,7 @@ const htmlTemplate = `<!DOCTYPE html>
     <!-- 5. HA / Replication Topology Consolidated -->
     <h2 id="replication">5. HA &amp; Replication Topology</h2>
     
-    <h3>🧬 Replication Slave / Replica Channels Status</h3>
+    <h3>Replication Slave / Replica Channels Status</h3>
     <table>
         <thead>
             <tr>
@@ -1661,7 +1688,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <h3>👥 Group Replication Members</h3>
+    <h3>Group Replication Members</h3>
     <table>
         <thead>
             <tr>
@@ -1698,7 +1725,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     {{if or .GRFlowControlLimit .GRQueues}}
-    <h3>📊 Group Replication Queues</h3>
+    <h3>Group Replication Queues</h3>
     {{if .GRFlowControlLimit}}
     <p><strong>{{.GRFlowControlLimit}}</strong></p>
     {{end}}
@@ -1724,19 +1751,16 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
     {{end}}
 
-    {{if or .GaleraFlowControl .GaleraStatus}}
-    <h3>🛡️ Galera / Percona XtraDB Cluster (PXC) Flow Control &amp; Status Checks</h3>
-    {{if .GaleraFlowControl}}
-    <p><strong>wsrep_flow_control_status:</strong> <code>{{.GaleraFlowControl}}</code></p>
-    {{end}}
-    
+    {{if or .GaleraFlowControl .GaleraSummary.ClusterSize}}
+    <h3>Galera / Percona XtraDB Cluster (PXC) Flow Control &amp; Status</h3>
+
     {{if .GaleraQueues.RecvQueue}}
-    <table style="max-width:650px; margin-bottom:15px;">
+    <table style="max-width:600px; margin-bottom:15px;">
         <thead>
             <tr>
-                <th>Galera Recv Queue (local_recv_queue)</th>
-                <th>Galera Send Queue (local_send_queue)</th>
-                <th>Flow Control Paused Fraction (flow_control_paused)</th>
+                <th>Recv Queue</th>
+                <th>Send Queue</th>
+                <th>Flow Control Paused</th>
             </tr>
         </thead>
         <tbody>
@@ -1749,28 +1773,62 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
     {{end}}
 
-    <table>
+    <table style="max-width:600px; margin-bottom:15px;">
         <thead>
             <tr>
-                <th>Galera Cluster Status Parameter</th>
-                <th>State Value</th>
+                <th>Cluster Name</th>
+                <th>Cluster Size</th>
+                <th>Cluster Status</th>
+                <th>Flow Control</th>
             </tr>
         </thead>
         <tbody>
-            {{range .GaleraStatus}}
             <tr>
-                <td><strong>{{.Key}}</strong></td>
-                <td><code>{{.Value}}</code></td>
+                <td><strong>{{.GaleraSummary.ClusterName}}</strong></td>
+                <td class="text-right"><strong>{{.GaleraSummary.ClusterSize}}</strong></td>
+                <td>{{.GaleraSummary.ClusterStatus}}</td>
+                <td>{{if .GaleraFlowControl}}{{.GaleraFlowControl}}{{else}}—{{end}}</td>
             </tr>
-            {{else}}
-            <tr><td colspan="2">No live Galera status variables found.</td></tr>
-            {{end}}
         </tbody>
     </table>
+
+    {{if .GaleraSummary.IncomingAddresses}}
+    <h4>PXC Cluster Node Members</h4>
+    <table style="max-width:400px;">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Node Address</th>
+                <th>Port</th>
+            </tr>
+        </thead>
+        <tbody id="pxc-nodes-tbody">
+            <tr><td colspan="3">Loading...</td></tr>
+        </tbody>
+    </table>
+    <script>
+    (function() {
+        var raw = "{{.GaleraSummary.IncomingAddresses}}";
+        var nodes = raw.split(",");
+        var tbody = document.getElementById("pxc-nodes-tbody");
+        tbody.innerHTML = "";
+        nodes.forEach(function(addr, i) {
+            addr = addr.trim();
+            var parts = addr.split(":");
+            var host = parts[0] || addr;
+            var port = parts[1] || "";
+            var tr = document.createElement("tr");
+            tr.innerHTML = "<td>" + (i + 1) + "</td><td><strong>" + host + "</strong></td><td><code>" + port + "</code></td>";
+            tbody.appendChild(tr);
+        });
+    })();
+    </script>
+    {{end}}
+
     {{end}}
 
     {{if or .ClusterStatus .ClusterSetStatus .Routers}}
-    <h3>🛡️ InnoDB Clusters &amp; ClusterSet Metadata Details</h3>
+    <h3>InnoDB Clusters &amp; ClusterSet Metadata Details</h3>
     {{if .ClusterStatus}}
     <p>InnoDB Cluster Status (cluster.status):</p>
     <pre>{{.ClusterStatus}}</pre>
@@ -1782,7 +1840,7 @@ const htmlTemplate = `<!DOCTYPE html>
     {{end}}
 
     {{if .Routers}}
-    <h3>🛡️ Registered MySQLRouter</h3>
+    <h3>Registered MySQL Router</h3>
     <table>
         <thead>
             <tr>
@@ -1848,7 +1906,7 @@ const htmlTemplate = `<!DOCTYPE html>
     <!-- 7. Process List & Query History -->
     <h2 id="process">7. Process List &amp; Query History</h2>
     
-    <h3>🖥️ Active Connections Thread Status (SHOW FULL PROCESSLIST)</h3>
+    <h3>Active Connections Thread Status</h3>
     <table>
         <thead>
             <tr>
@@ -1880,7 +1938,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <h3>📈 Historical Statement Summary Digests (Top Query Stats)</h3>
+    <h3>Historical Statement Summary Digests</h3>
     <table>
         <thead>
             <tr>
@@ -1922,7 +1980,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <h3>🔒 Lock Waits &amp; Blocking Transactions</h3>
+    <h3>Lock Waits &amp; Blocking Transactions</h3>
     <table>
         <thead>
             <tr>
@@ -1966,7 +2024,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <h3>🔒 MDL &amp; DDL Lock Waits</h3>
+    <h3>MDL &amp; DDL Lock Waits</h3>
     <table>
         <thead>
             <tr>
@@ -2001,7 +2059,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     {{if .DDLLocks}}
-    <h3>🔒 Blocking Session SQL History</h3>
+    <h3>Blocking Session SQL History</h3>
     <table>
         <thead>
             <tr>
@@ -2026,7 +2084,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
     {{end}}
 
-    <h3>⚡ Active Transactions (information_schema.innodb_trx)</h3>
+    <h3>Active Transactions</h3>
     <table>
         <thead>
             <tr>
@@ -2069,7 +2127,7 @@ const htmlTemplate = `<!DOCTYPE html>
     <!-- 8. Major Performance Schema Insights -->
     <h2 id="perf-schema">8. Performance Schema Insights</h2>
 
-    <h3>🧵 Performance Schema Threads</h3>
+    <h3>Performance Schema Threads</h3>
     <table>
         <thead>
             <tr>
