@@ -1,6 +1,6 @@
 # MySQL Gather
 
-A Go-based tool to gather MySQL insight and performance data and output it   in an HTML file[mysql_gather.html].
+A Go-based tool to gather MySQL insight and performance metrics and output it  in an HTML report.
 
 ## How to Run
 
@@ -14,10 +14,6 @@ Go to the **Releases** tab, download the binary for your OS, and run it via term
 **Mac:** `./mysql_gather_mac_Darwin_<ARCH> --user=<USER> --password=<PASSWORD> --host=<HOST>  --port=<PORT>`
 
 ### Option 2: Build from Source (Requires Go installed)
-
-**Download Dependencies**
-go installation
-go mod tidy
 
 
 ```bash
