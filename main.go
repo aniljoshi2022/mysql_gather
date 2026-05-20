@@ -68,13 +68,24 @@ type GroupMember struct {
 
 // ReplicationStatus holds replica status info
 type ReplicationStatus struct {
-	ChannelName       string
-	ReplicaIORunning  string
-	ReplicaSQLRunning string
-	SourceHost        string
-	SecondsBehind     string
-	LastIOError       string
-	LastSQLError      string
+	ChannelName          string
+	ReplicaIORunning     string
+	ReplicaSQLRunning    string
+	SourceHost           string
+	SourceUser           string
+	SourcePort           string
+	MasterLogFile        string
+	ReadMasterLogPos     string
+	RelayLogFile         string
+	RelayLogPos          string
+	RelayMasterLogFile   string
+	ExecMasterLogPos     string
+	SecondsBehind        string
+	RetrievedGtidSet     string
+	ExecutedGtidSet      string
+	LastIOError          string
+	LastSQLError         string
+	AutoPosition         string
 }
 
 // GRMemberStats holds Group Replication queue lengths for Flow Control checks
@@ -616,12 +627,34 @@ func main() {
 						status.ReplicaSQLRunning = valStr
 					case "SOURCE_HOST", "MASTER_HOST":
 						status.SourceHost = valStr
+					case "SOURCE_USER", "MASTER_USER":
+						status.SourceUser = valStr
+					case "SOURCE_PORT", "MASTER_PORT":
+						status.SourcePort = valStr
+					case "SOURCE_LOG_FILE", "MASTER_LOG_FILE":
+						status.MasterLogFile = valStr
+					case "READ_SOURCE_LOG_POS", "READ_MASTER_LOG_POS":
+						status.ReadMasterLogPos = valStr
+					case "RELAY_LOG_FILE":
+						status.RelayLogFile = valStr
+					case "RELAY_LOG_POS":
+						status.RelayLogPos = valStr
+					case "RELAY_SOURCE_LOG_FILE", "RELAY_MASTER_LOG_FILE":
+						status.RelayMasterLogFile = valStr
+					case "EXEC_SOURCE_LOG_POS", "EXEC_MASTER_LOG_POS":
+						status.ExecMasterLogPos = valStr
 					case "SECONDS_BEHIND_SOURCE", "SECONDS_BEHIND_MASTER":
 						status.SecondsBehind = valStr
+					case "RETRIEVED_GTID_SET":
+						status.RetrievedGtidSet = valStr
+					case "EXECUTED_GTID_SET":
+						status.ExecutedGtidSet = valStr
 					case "LAST_IO_ERROR":
 						status.LastIOError = valStr
 					case "LAST_SQL_ERROR":
 						status.LastSQLError = valStr
+					case "AUTO_POSITION":
+						status.AutoPosition = valStr
 					}
 				}
 				if status.ChannelName == "" {
@@ -1659,34 +1692,92 @@ const htmlTemplate = `<!DOCTYPE html>
     <h2 id="replication">5. HA &amp; Replication Topology</h2>
     
     <h3>Replication Slave / Replica Channels Status</h3>
-    <table>
+    {{if .ReplicationStates}}
+    {{range .ReplicationStates}}
+    <table style="max-width:900px; margin-bottom:6px;">
         <thead>
             <tr>
-                <th>Channel Name</th>
+                <th>Channel</th>
                 <th>IO Running</th>
                 <th>SQL Running</th>
                 <th>Source Host</th>
-                <th>Seconds Behind</th>
+                <th>Source User</th>
+                <th>Source Port</th>
+                <th>Lag (s)</th>
+                <th>Auto Position</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>{{.ChannelName}}</strong></td>
+                <td>{{if eq .ReplicaIORunning "Yes"}}<span style="color:green;font-weight:bold;">Yes</span>{{else}}<span style="color:red;font-weight:bold;">{{.ReplicaIORunning}}</span>{{end}}</td>
+                <td>{{if eq .ReplicaSQLRunning "Yes"}}<span style="color:green;font-weight:bold;">Yes</span>{{else}}<span style="color:red;font-weight:bold;">{{.ReplicaSQLRunning}}</span>{{end}}</td>
+                <td><strong>{{.SourceHost}}</strong></td>
+                <td>{{.SourceUser}}</td>
+                <td>{{.SourcePort}}</td>
+                <td><strong>{{.SecondsBehind}}</strong></td>
+                <td>{{.AutoPosition}}</td>
+            </tr>
+        </tbody>
+    </table>
+    <table style="max-width:900px; margin-bottom:20px;">
+        <thead>
+            <tr>
+                <th>Master Log File</th>
+                <th>Read Master Log Pos</th>
+                <th>Relay Log File</th>
+                <th>Relay Log Pos</th>
+                <th>Relay Master Log File</th>
+                <th>Exec Master Log Pos</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>{{.MasterLogFile}}</code></td>
+                <td class="text-right">{{.ReadMasterLogPos}}</td>
+                <td><code>{{.RelayLogFile}}</code></td>
+                <td class="text-right">{{.RelayLogPos}}</td>
+                <td><code>{{.RelayMasterLogFile}}</code></td>
+                <td class="text-right">{{.ExecMasterLogPos}}</td>
+            </tr>
+        </tbody>
+    </table>
+    {{if or .RetrievedGtidSet .ExecutedGtidSet}}
+    <table style="max-width:900px; margin-bottom:20px;">
+        <thead>
+            <tr>
+                <th>Retrieved GTID Set</th>
+                <th>Executed GTID Set</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><small><code>{{if .RetrievedGtidSet}}{{.RetrievedGtidSet}}{{else}}—{{end}}</code></small></td>
+                <td><small><code>{{if .ExecutedGtidSet}}{{.ExecutedGtidSet}}{{else}}—{{end}}</code></small></td>
+            </tr>
+        </tbody>
+    </table>
+    {{end}}
+    {{if or .LastIOError .LastSQLError}}
+    <table style="max-width:900px; margin-bottom:20px;">
+        <thead>
+            <tr>
                 <th>Last IO Error</th>
                 <th>Last SQL Error</th>
             </tr>
         </thead>
         <tbody>
-            {{range .ReplicationStates}}
             <tr>
-                <td><strong>{{.ChannelName}}</strong></td>
-                <td>{{.ReplicaIORunning}}</td>
-                <td>{{.ReplicaSQLRunning}}</td>
-                <td>{{.SourceHost}}</td>
-                <td><strong>{{.SecondsBehind}}</strong></td>
-                <td><small>{{.LastIOError}}</small></td>
-                <td><small>{{.LastSQLError}}</small></td>
+                <td><small style="color:red;">{{if .LastIOError}}{{.LastIOError}}{{else}}—{{end}}</small></td>
+                <td><small style="color:red;">{{if .LastSQLError}}{{.LastSQLError}}{{else}}—{{end}}</small></td>
             </tr>
-            {{else}}
-            <tr><td colspan="7">No active replica replication states are configured.</td></tr>
-            {{end}}
         </tbody>
     </table>
+    {{end}}
+    {{end}}
+    {{else}}
+    <table><tbody><tr><td>No active replica / replication channels configured on this node.</td></tr></tbody></table>
+    {{end}}
 
     <h3>Group Replication Members</h3>
     <table>
