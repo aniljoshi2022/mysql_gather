@@ -44,8 +44,7 @@ chmod +x mysql_gather
 
 ### Screenshots
 
-<img width="3010" height="1636" alt="image" src="https://github.com/user-attachments/assets/69a1e627-91ba-4096-8669-a469e7cc845b" />
-<img width="3024" height="1484" alt="image" src="https://github.com/user-attachments/assets/fe4a99bd-3a72-4590-a383-e3f25453f461" />
+<img width="100%" alt="mysql_gather UI" src="https://github.com/user-attachments/assets/69a1e627-91ba-4096-8669-a469e7cc845b" />
 
-
+<img width="100%" alt="HA/Replication" src="https://github.com/user-attachments/assets/fe4a99bd-3a72-4590-a383-e3f25453f461" />
 
