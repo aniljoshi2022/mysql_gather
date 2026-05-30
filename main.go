@@ -1,18 +1,46 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// #region agent log
+func debugLog(hypothesisID, location, message string, data map[string]interface{}) {
+	payload := map[string]interface{}{
+		"sessionId":    "837454",
+		"runId":        "pre-fix",
+		"hypothesisId": hypothesisID,
+		"location":     location,
+		"message":      message,
+		"data":         data,
+		"timestamp":    time.Now().UnixMilli(),
+	}
+	line, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile("/Users/aniljoshi/.cursor/debug-logs/debug-837454.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(line, '\n'))
+}
+
+// #endregion
 
 // SummaryInfo holds basic server metadata, including mysqladmin status metrics
 type SummaryInfo struct {
@@ -88,6 +116,22 @@ type ReplicationStatus struct {
 	AutoPosition         string
 }
 
+// ReplicaWorkerStatus holds per-worker applier error details
+// from performance_schema.replication_applier_status_by_worker
+type ReplicaWorkerStatus struct {
+	ChannelName        string
+	WorkerID           string
+	LastErrorNumber    string
+	LastErrorMessage   string
+	LastErrorTimestamp string
+}
+
+// GTIDInfo holds the gtid_executed and gtid_purged values
+type GTIDInfo struct {
+	GTIDExecuted string
+	GTIDPurged   string
+}
+
 // GRMemberStats holds Group Replication queue lengths for Flow Control checks
 type GRMemberStats struct {
 	MemberID     string
@@ -100,6 +144,33 @@ type GaleraQueueStats struct {
 	RecvQueue         string
 	SendQueue         string
 	FlowControlPaused string
+}
+
+// WsrepProviderOption is a single parsed key=value from wsrep_provider_options
+type WsrepProviderOption struct {
+	Key   string
+	Value string
+}
+
+// WsrepQueueMax holds wsrep_local_recv_queue and wsrep_local_recv_queue_max
+// from performance_schema.global_status, used for fc_limit comparison
+type WsrepQueueMax struct {
+	RecvQueue    string
+	RecvQueueMax string
+	FCLimit      string // extracted gcs.fc_limit from wsrep_provider_options
+	FCMasterSlave string // extracted gcs.fc_master_slave
+	FCSinglePrimary string // extracted gcs.fc_single_primary
+	Alert        bool   // true when RecvQueueMax >= FCLimit
+}
+
+// GRFlowConfig holds the Group Replication flow control + consistency variables
+type GRFlowConfig struct {
+	CommStack         string
+	Consistency       string
+	ApplierThreshold  string
+	CertThreshold     string
+	FlowControlMode   string
+	BootstrapGroup    string
 }
 
 // GaleraSummary holds the key PXC cluster identity and status fields
@@ -258,6 +329,260 @@ type Recommendation struct {
 	Description string
 }
 
+// ── InnoDB ClusterSet topology structs ──────────────────────────────────────
+
+// CSTopologyNode is one member inside a cluster's topology map
+type CSTopologyNode struct {
+	Address        string
+	MemberRole     string // PRIMARY / SECONDARY
+	Mode           string // R/W or R/O
+	Status         string // ONLINE / OFFLINE / ...
+	Version        string
+	ReplicationLag string // replicationLagFromImmediateSource
+}
+
+// CSCluster represents one cluster inside the ClusterSet
+type CSCluster struct {
+	Name                      string
+	ClusterRole               string // PRIMARY / REPLICA
+	GlobalStatus              string
+	Status                    string
+	StatusText                string
+	Primary                   string // primary member address (primary cluster only)
+	TransactionSet            string
+	TxConsistencyStatus       string
+	TxErrantGTID              string
+	TxMissingGTID             string
+	// ClusterSet replication channel (replica clusters only)
+	CSReplSource              string
+	CSReplReceiver            string
+	CSReplReceiverStatus      string
+	CSReplApplierStatus       string
+	CSReplApplierThreads      int
+	CSReplReceiverThreadState string
+	CSReplApplierThreadState  string
+	CSReplSSLMode             string
+	Nodes                     []CSTopologyNode
+}
+
+// ClusterSetTopology is the top-level parsed result
+type ClusterSetTopology struct {
+	DomainName            string
+	GlobalPrimaryInstance string
+	PrimaryCluster        string
+	Status                string
+	StatusText            string
+	MetadataServer        string
+	PrimaryClusterData    *CSCluster
+	ReplicaClusters       []CSCluster
+}
+
+// ── Raw JSON structs for unmarshalling mysqlsh output ───────────────────────
+
+// CSRouter is one entry from myclusterset.listRouters()
+type CSRouter struct {
+	RouterKey     string
+	Hostname      string
+	LastCheckIn   string
+	ROPort        string
+	ROXPort       string
+	RWPort        string
+	RWXPort       string
+	RWSplitPort   string
+	TargetCluster string
+	Version       string
+}
+
+// CSRoutingOptions holds global + per-router routing policy from routingOptions()
+type CSRoutingOptions struct {
+	DomainName              string
+	GlobalInvalidatedPolicy string
+	GlobalStatsFrequency    string
+	GlobalTargetCluster     string
+	RouterOverrides         map[string]string
+}
+
+type csRawRouterEntry struct {
+	Hostname      string `json:"hostname"`
+	LastCheckIn   string `json:"lastCheckIn"`
+	RoPort        string `json:"roPort"`
+	RoXPort       string `json:"roXPort"`
+	RwPort        string `json:"rwPort"`
+	RwXPort       string `json:"rwXPort"`
+	TargetCluster string `json:"targetCluster"`
+	Version       string `json:"version"`
+}
+type csRawRouterList struct {
+	DomainName string                      `json:"domainName"`
+	Routers    map[string]csRawRouterEntry `json:"routers"`
+}
+type csRawRoutingGlobal struct {
+	InvalidatedClusterPolicy string `json:"invalidated_cluster_policy"`
+	StatsUpdatesFrequency    int    `json:"stats_updates_frequency"`
+	TargetCluster            string `json:"target_cluster"`
+}
+type csRawRoutingRouter struct {
+	TargetCluster string `json:"target_cluster"`
+}
+type csRawRoutingOptions struct {
+	DomainName string                            `json:"domainName"`
+	Global     csRawRoutingGlobal                `json:"global"`
+	Routers    map[string]csRawRoutingRouter     `json:"routers"`
+}
+
+func parseRouterList(raw []byte) ([]CSRouter, error) {
+	var rl csRawRouterList
+	if err := json.Unmarshal(raw, &rl); err != nil { return nil, err }
+	var out []CSRouter
+	for key, r := range rl.Routers {
+		out = append(out, CSRouter{RouterKey: key, Hostname: r.Hostname,
+			LastCheckIn: r.LastCheckIn, ROPort: r.RoPort, ROXPort: r.RoXPort,
+			RWPort: r.RwPort, RWXPort: r.RwXPort, TargetCluster: r.TargetCluster, Version: r.Version})
+	}
+	return out, nil
+}
+
+func parseRoutingOptions(raw []byte) (*CSRoutingOptions, error) {
+	var ro csRawRoutingOptions
+	if err := json.Unmarshal(raw, &ro); err != nil { return nil, err }
+	overrides := map[string]string{}
+	for k, v := range ro.Routers {
+		if v.TargetCluster != "" { overrides[k] = v.TargetCluster }
+	}
+	return &CSRoutingOptions{
+		DomainName: ro.DomainName, GlobalInvalidatedPolicy: ro.Global.InvalidatedClusterPolicy,
+		GlobalStatsFrequency: fmt.Sprintf("%d", ro.Global.StatsUpdatesFrequency),
+		GlobalTargetCluster: ro.Global.TargetCluster, RouterOverrides: overrides,
+	}, nil
+}
+
+// prettyJSONRaw indents JSON for HTML display (e.g. mysqlsh status output).
+func prettyJSONRaw(raw json.RawMessage) string {
+	if len(raw) <= 2 {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		return string(raw)
+	}
+	return buf.String()
+}
+
+// csRunMysqlsh runs a JS snippet via mysqlsh and returns stdout trimmed to first '{'
+func csRunMysqlsh(bin, uri, password, jsCode string) ([]byte, error) {
+	cmd := exec.Command(bin, "--uri="+uri, "--password="+password, "--js", "--no-wizard", "-e", jsCode)
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = &out; cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%v — %s", err, strings.TrimSpace(errBuf.String()))
+	}
+	raw := bytes.TrimSpace(out.Bytes())
+	if idx := bytes.IndexByte(raw, '{'); idx >= 0 { raw = raw[idx:] }
+	return raw, nil
+}
+
+type csRawNode struct {
+	Address        string `json:"address"`
+	MemberRole     string `json:"memberRole"`
+	Mode           string `json:"mode"`
+	Role           string `json:"role"`
+	Status         string `json:"status"`
+	Version        string `json:"version"`
+	ReplicationLag string `json:"replicationLagFromImmediateSource"`
+}
+
+type csRawReplication struct {
+	ApplierStatus       string `json:"applierStatus"`
+	ApplierThreadState  string `json:"applierThreadState"`
+	ApplierWorkerThreads int   `json:"applierWorkerThreads"`
+	Receiver            string `json:"receiver"`
+	ReceiverStatus      string `json:"receiverStatus"`
+	ReceiverThreadState string `json:"receiverThreadState"`
+	ReplicationSslMode  string `json:"replicationSslMode"`
+	Source              string `json:"source"`
+}
+
+type csRawCluster struct {
+	ClusterRole               string                       `json:"clusterRole"`
+	GlobalStatus              string                       `json:"globalStatus"`
+	Status                    string                       `json:"status"`
+	StatusText                string                       `json:"statusText"`
+	Primary                   string                       `json:"primary"`
+	TransactionSet            string                       `json:"transactionSet"`
+	TxConsistencyStatus       string                       `json:"transactionSetConsistencyStatus"`
+	TxErrantGTID              string                       `json:"transactionSetErrantGtidSet"`
+	TxMissingGTID             string                       `json:"transactionSetMissingGtidSet"`
+	ClusterSetReplication     *csRawReplication            `json:"clusterSetReplication"`
+	Topology                  map[string]csRawNode         `json:"topology"`
+}
+
+type csRawRoot struct {
+	DomainName            string                      `json:"domainName"`
+	GlobalPrimaryInstance string                      `json:"globalPrimaryInstance"`
+	PrimaryCluster        string                      `json:"primaryCluster"`
+	Status                string                      `json:"status"`
+	StatusText            string                      `json:"statusText"`
+	MetadataServer        string                      `json:"metadataServer"`
+	Clusters              map[string]csRawCluster     `json:"clusters"`
+}
+
+// parseClusterSetJSON converts the raw mysqlsh JSON into ClusterSetTopology
+func parseClusterSetJSON(raw []byte) (*ClusterSetTopology, error) {
+	var root csRawRoot
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, err
+	}
+	topo := &ClusterSetTopology{
+		DomainName:            root.DomainName,
+		GlobalPrimaryInstance: root.GlobalPrimaryInstance,
+		PrimaryCluster:        root.PrimaryCluster,
+		Status:                root.Status,
+		StatusText:            root.StatusText,
+		MetadataServer:        root.MetadataServer,
+	}
+	for name, rc := range root.Clusters {
+		cl := CSCluster{
+			Name:                name,
+			ClusterRole:         rc.ClusterRole,
+			GlobalStatus:        rc.GlobalStatus,
+			Status:              rc.Status,
+			StatusText:          rc.StatusText,
+			Primary:             rc.Primary,
+			TransactionSet:      rc.TransactionSet,
+			TxConsistencyStatus: rc.TxConsistencyStatus,
+			TxErrantGTID:        rc.TxErrantGTID,
+			TxMissingGTID:       rc.TxMissingGTID,
+		}
+		if rc.ClusterSetReplication != nil {
+			r := rc.ClusterSetReplication
+			cl.CSReplSource         = r.Source
+			cl.CSReplReceiver       = r.Receiver
+			cl.CSReplReceiverStatus = r.ReceiverStatus
+			cl.CSReplApplierStatus  = r.ApplierStatus
+			cl.CSReplApplierThreads = r.ApplierWorkerThreads
+			cl.CSReplReceiverThreadState = r.ReceiverThreadState
+			cl.CSReplApplierThreadState  = r.ApplierThreadState
+			cl.CSReplSSLMode        = r.ReplicationSslMode
+		}
+		for _, node := range rc.Topology {
+			cl.Nodes = append(cl.Nodes, CSTopologyNode{
+				Address:        node.Address,
+				MemberRole:     node.MemberRole,
+				Mode:           node.Mode,
+				Status:         node.Status,
+				Version:        node.Version,
+				ReplicationLag: node.ReplicationLag,
+			})
+		}
+		if name == root.PrimaryCluster {
+			topo.PrimaryClusterData = &cl
+		} else {
+			topo.ReplicaClusters = append(topo.ReplicaClusters, cl)
+		}
+	}
+	return topo, nil
+}
+
 // PageData holds all variables injected into the HTML template
 type PageData struct {
 	Summary              SummaryInfo
@@ -269,16 +594,25 @@ type PageData struct {
 	ReplicationStates    []ReplicationStatus
 	GRQueues             []GRMemberStats
 	GRFlowControlLimit   string
+	GRFlowConfig         GRFlowConfig
 	GaleraSummary        GaleraSummary
 	GaleraFlowControl    string
 	GaleraQueues         GaleraQueueStats
+	WsrepProviderOptions []WsrepProviderOption
+	WsrepQueueMax        WsrepQueueMax
 	MasterStatus         []KeyVal
+	ReplicaWorkers       []ReplicaWorkerStatus
+	GTIDInfo             GTIDInfo
 	InnodbStatus         string
 	MemoryEvents         []MemoryEvent
 	WaitEvents           []WaitEvent
 	FileIOEvents         []FileIOEvent
 	ClusterStatus        string
 	ClusterSetStatus     string
+	ClusterSetTopology   *ClusterSetTopology
+	CSRouters            []CSRouter
+	CSRoutingOptions     *CSRoutingOptions
+	SingleClusterTopo    *ClusterSetTopology // for non-ClusterSet single cluster
 	RouterList           string
 	RouterOptions        string
 	Routers              []RouterDetails
@@ -376,6 +710,262 @@ func fetchJSONValue(jsonStr, key, fallback string) string {
 }
 
 // Executed precise SQL metadata join query requested by the user
+// collectInnoDBTopologySQL builds ClusterSet and single-cluster topology
+// entirely from mysql_innodb_cluster_metadata SQL tables — no mysqlsh needed.
+func collectInnoDBTopologySQL(db *sql.DB) (csTop *ClusterSetTopology, singleTop *ClusterSetTopology) {
+	// Check schema exists
+	var schemaExists int
+	db.QueryRow(`SELECT COUNT(*) FROM information_schema.schemata
+		WHERE schema_name = 'mysql_innodb_cluster_metadata'`).Scan(&schemaExists)
+	if schemaExists == 0 {
+		return nil, nil
+	}
+
+	// ── ClusterSet identity ───────────────────────────────────────────────────
+	var domainName, csStatus, globalPrimary string
+	_ = db.QueryRow(`
+		SELECT
+			IFNULL(domain_name,''),
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(attributes,'$.globalStatus')),''),
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(attributes,'$.primaryCluster')),'')
+		FROM mysql_innodb_cluster_metadata.clustersets
+		LIMIT 1`).Scan(&domainName, &csStatus, &globalPrimary)
+
+	isClusterSet := domainName != ""
+
+	// ── All clusters in this setup ────────────────────────────────────────────
+	type sqlCluster struct {
+		id          string
+		name        string
+		clusterType string // gr or ar
+	}
+	var allClusters []sqlCluster
+	cRows, cErr := db.Query(`
+		SELECT cluster_id, cluster_name, IFNULL(cluster_type,'gr')
+		FROM mysql_innodb_cluster_metadata.clusters
+		ORDER BY cluster_name`)
+	if cErr == nil {
+		defer cRows.Close()
+		for cRows.Next() {
+			var sc sqlCluster
+			cRows.Scan(&sc.id, &sc.name, &sc.clusterType)
+			allClusters = append(allClusters, sc)
+		}
+	}
+	if len(allClusters) == 0 {
+		return nil, nil
+	}
+
+	// ── Determine primary cluster name from clusterset_members ───────────────
+	var primaryClusterName string
+	_ = db.QueryRow(`
+		SELECT c.cluster_name
+		FROM mysql_innodb_cluster_metadata.clusters c
+		JOIN mysql_innodb_cluster_metadata.clusterset_members csm
+		  ON c.cluster_id = csm.cluster_id
+		WHERE csm.master_cluster_id IS NULL OR csm.master_cluster_id = csm.cluster_id
+		LIMIT 1`).Scan(&primaryClusterName)
+	if primaryClusterName == "" && len(allClusters) == 1 {
+		primaryClusterName = allClusters[0].name
+	}
+
+	// ── Per-cluster topology nodes ────────────────────────────────────────────
+	buildCluster := func(clusterID, clusterName string) CSCluster {
+		cl := CSCluster{Name: clusterName}
+		// Determine if this cluster is primary or replica in a ClusterSet
+		if isClusterSet {
+			var role string
+			_ = db.QueryRow(`
+				SELECT CASE WHEN master_cluster_id IS NULL OR master_cluster_id = cluster_id
+				            THEN 'PRIMARY' ELSE 'REPLICA' END
+				FROM mysql_innodb_cluster_metadata.clusterset_members
+				WHERE cluster_id = ? LIMIT 1`, clusterID).Scan(&role)
+			cl.ClusterRole = role
+		} else {
+			cl.ClusterRole = "PRIMARY"
+		}
+
+		// Nodes from instances + GR member status
+		iRows, iErr := db.Query(`
+			SELECT
+				IFNULL(i.address,''),
+				IFNULL(i.mysql_server_uuid,''),
+				IFNULL(JSON_UNQUOTE(JSON_EXTRACT(i.addresses,'$.mysqlClassic')),'') AS classic_addr,
+				IFNULL(m.MEMBER_ROLE,'UNKNOWN') AS member_role,
+				IFNULL(m.MEMBER_STATE,'UNKNOWN') AS member_state,
+				IFNULL(m.MEMBER_VERSION,'') AS member_version
+			FROM mysql_innodb_cluster_metadata.instances i
+			LEFT JOIN performance_schema.replication_group_members m
+			  ON i.mysql_server_uuid = m.MEMBER_ID
+			WHERE i.cluster_id = ?
+			ORDER BY i.instance_id`, clusterID)
+		if iErr == nil {
+			defer iRows.Close()
+			for iRows.Next() {
+				var addr, uuid, classicAddr, role, state, version string
+				iRows.Scan(&addr, &uuid, &classicAddr, &role, &state, &version)
+				displayAddr := addr
+				if displayAddr == "" { displayAddr = classicAddr }
+				mode := "R/O"
+				if role == "PRIMARY" { mode = "R/W" }
+				cl.Nodes = append(cl.Nodes, CSTopologyNode{
+					Address: displayAddr, MemberRole: role,
+					Mode: mode, Status: state, Version: version,
+				})
+			}
+		}
+
+		// ClusterSet replication channel for REPLICA clusters
+		if cl.ClusterRole == "REPLICA" {
+			var src, rcvr, rcvrState, applState string
+			var workers int
+			_ = db.QueryRow(`
+				SELECT
+					IFNULL(CONCAT(css.HOST,':',css.PORT),'') AS source,
+					IFNULL(csa.HOST,'') AS receiver,
+					IFNULL(ios.SERVICE_STATE,'') AS receiver_state,
+					IFNULL(apps.SERVICE_STATE,'') AS applier_state,
+					IFNULL(asw.WORKER_COUNT,0) AS workers
+				FROM performance_schema.replication_connection_status ios
+				LEFT JOIN performance_schema.replication_connection_configuration css
+				  ON ios.CHANNEL_NAME = css.CHANNEL_NAME
+				LEFT JOIN performance_schema.replication_applier_status apps
+				  ON ios.CHANNEL_NAME = apps.CHANNEL_NAME
+				LEFT JOIN (
+					SELECT CHANNEL_NAME, COUNT(*) AS WORKER_COUNT
+					FROM performance_schema.replication_applier_status_by_worker
+					GROUP BY CHANNEL_NAME
+				) asw ON ios.CHANNEL_NAME = asw.CHANNEL_NAME
+				LEFT JOIN performance_schema.replication_connection_configuration csa
+				  ON ios.CHANNEL_NAME = csa.CHANNEL_NAME
+				WHERE ios.CHANNEL_NAME LIKE '%clusterset%'
+				LIMIT 1`).Scan(&src, &rcvr, &rcvrState, &applState, &workers)
+			cl.CSReplSource         = src
+			cl.CSReplReceiver       = rcvr
+			cl.CSReplReceiverStatus = rcvrState
+			cl.CSReplApplierStatus  = applState
+			cl.CSReplApplierThreads = workers
+
+			// GTID info
+			var txSet, txConsistency, txErrant, txMissing string
+			_ = db.QueryRow(`
+				SELECT
+					IFNULL(RECEIVED_TRANSACTION_SET,''),
+					'OK',
+					'',
+					''
+				FROM performance_schema.replication_connection_status
+				WHERE CHANNEL_NAME LIKE '%clusterset%'
+				LIMIT 1`).Scan(&txSet, &txConsistency, &txErrant, &txMissing)
+			cl.TransactionSet      = txSet
+			cl.TxConsistencyStatus = txConsistency
+		} else {
+			// Primary: get executed GTID set
+			_ = db.QueryRow(`SELECT IFNULL(VARIABLE_VALUE,'')
+				FROM performance_schema.global_variables
+				WHERE VARIABLE_NAME = 'gtid_executed'`).Scan(&cl.TransactionSet)
+		}
+
+		// Cluster global status from GR summary
+		var onlineCount int
+		db.QueryRow(`SELECT COUNT(*) FROM performance_schema.replication_group_members
+			WHERE MEMBER_STATE = 'ONLINE'`).Scan(&onlineCount)
+		if onlineCount > 0 { cl.GlobalStatus = "OK" } else { cl.GlobalStatus = "ERROR" }
+
+		return cl
+	}
+
+	if isClusterSet {
+		topo := &ClusterSetTopology{
+			DomainName:     domainName,
+			Status:         csStatus,
+			PrimaryCluster: primaryClusterName,
+		}
+		// Global primary from GR
+		_ = db.QueryRow(`
+			SELECT IFNULL(CONCAT(i.address),'')
+			FROM mysql_innodb_cluster_metadata.instances i
+			JOIN performance_schema.replication_group_members m
+			  ON i.mysql_server_uuid = m.MEMBER_ID
+			WHERE m.MEMBER_ROLE = 'PRIMARY'
+			LIMIT 1`).Scan(&topo.GlobalPrimaryInstance)
+
+		for _, sc := range allClusters {
+			cl := buildCluster(sc.id, sc.name)
+			if sc.name == primaryClusterName {
+				clCopy := cl
+				topo.PrimaryClusterData = &clCopy
+			} else {
+				topo.ReplicaClusters = append(topo.ReplicaClusters, cl)
+			}
+		}
+		return topo, nil
+	}
+
+	// Single cluster (no ClusterSet)
+	sc := allClusters[0]
+	cl := buildCluster(sc.id, sc.name)
+	var globalPrimaryAddr string
+	_ = db.QueryRow(`
+		SELECT IFNULL(i.address,'')
+		FROM mysql_innodb_cluster_metadata.instances i
+		JOIN performance_schema.replication_group_members m
+		  ON i.mysql_server_uuid = m.MEMBER_ID
+		WHERE m.MEMBER_ROLE = 'PRIMARY'
+		LIMIT 1`).Scan(&globalPrimaryAddr)
+	singleTopo := &ClusterSetTopology{
+		GlobalPrimaryInstance: globalPrimaryAddr,
+		Status:                cl.GlobalStatus,
+		PrimaryClusterData:    &cl,
+	}
+	return nil, singleTopo
+}
+
+// collectRoutingOptionsSQL fetches router routing configuration from metadata tables
+func collectRoutingOptionsSQL(db *sql.DB) *CSRoutingOptions {
+	var schemaExists int
+	db.QueryRow(`SELECT COUNT(*) FROM information_schema.schemata
+		WHERE schema_name = 'mysql_innodb_cluster_metadata'`).Scan(&schemaExists)
+	if schemaExists == 0 {
+		return nil
+	}
+
+	opts := &CSRoutingOptions{RouterOverrides: map[string]string{}}
+
+	// Global routing options
+	_ = db.QueryRow(`
+		SELECT
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(router_options,'$.target_cluster')),''),
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(router_options,'$.invalidated_cluster_policy')),''),
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(router_options,'$.stats_updates_frequency')),'0')
+		FROM mysql_innodb_cluster_metadata.v2_router_options
+		LIMIT 1`).Scan(&opts.GlobalTargetCluster, &opts.GlobalInvalidatedPolicy, &opts.GlobalStatsFrequency)
+
+	// Per-router target_cluster overrides
+	rRows, err := db.Query(`
+		SELECT
+			IFNULL(r.router_name,''),
+			IFNULL(JSON_UNQUOTE(JSON_EXTRACT(o.router_options,'$.target_cluster')),'')
+		FROM mysql_innodb_cluster_metadata.v2_routers r
+		JOIN mysql_innodb_cluster_metadata.v2_router_options o USING(router_id)
+		WHERE JSON_UNQUOTE(JSON_EXTRACT(o.router_options,'$.target_cluster')) IS NOT NULL
+		  AND JSON_UNQUOTE(JSON_EXTRACT(o.router_options,'$.target_cluster')) != ''`)
+	if err == nil {
+		defer rRows.Close()
+		for rRows.Next() {
+			var name, target string
+			if rRows.Scan(&name, &target) == nil && name != "" {
+				opts.RouterOverrides[name] = target
+			}
+		}
+	}
+
+	if opts.GlobalTargetCluster == "" && opts.GlobalInvalidatedPolicy == "" {
+		return nil
+	}
+	return opts
+}
+
 func queryRouterMetadata(db *sql.DB) []RouterDetails {
 	var list []RouterDetails
 
@@ -446,11 +1036,11 @@ func queryRouterMetadata(db *sql.DB) []RouterDetails {
 
 func main() {
 	// 1. Command Line Flags for Connection Parameters (Zero Hardcoding)
-	user := flag.String("user", "root", "MySQL database user")
+	user     := flag.String("user", "root", "MySQL database user")
 	password := flag.String("password", "", "MySQL database password")
-	host := flag.String("host", "127.0.0.1", "MySQL host address")
-	port := flag.Int("port", 3306, "MySQL host port")
-	output := flag.String("output", "mysql_gather.html", "Path to write the standalone HTML report")
+	host     := flag.String("host", "127.0.0.1", "MySQL host address")
+	port     := flag.Int("port", 3306, "MySQL host port")
+	output   := flag.String("output", "mysql_gather.html", "Path to write the standalone HTML report")
 	flag.Parse()
 
 	log.Printf("Starting MySQL Gatherer. Connecting to %s:%d...", *host, *port)
@@ -567,6 +1157,17 @@ func main() {
 		}
 		rows.Close()
 	}
+	// #region agent log
+	for _, m := range data.EngineMetrics {
+		if m.Key == "Pending flushes (buffer pool)" {
+			debugLog("C", "main.go:engine-metrics", "buffer pool flush metric collected", map[string]interface{}{
+				"label": m.Key, "value": m.Value,
+				"note": "Innodb_buffer_pool_pages_flushed is cumulative since startup, not pending count",
+			})
+			break
+		}
+	}
+	// #endregion
 
 	// Section 2: SHOW GLOBAL VARIABLES (formatted to human-readable)
 	if rows, err := db.Query("SHOW GLOBAL VARIABLES;"); err == nil {
@@ -664,6 +1265,72 @@ func main() {
 			}
 		}
 		replicaRows.Close()
+	}
+
+	// ── NEW: Replication Applier Worker Status ──────────────────────────────
+	// Mirrors: SELECT CHANNEL_NAME,WORKER_ID,LAST_ERROR_NUMBER,
+	//                 LAST_ERROR_MESSAGE,LAST_ERROR_TIMESTAMP
+	//          FROM performance_schema.replication_applier_status_by_worker
+	workerSQL := `SELECT
+		IFNULL(CHANNEL_NAME, '') AS CHANNEL_NAME,
+		WORKER_ID,
+		LAST_ERROR_NUMBER,
+		IFNULL(LAST_ERROR_MESSAGE, '') AS LAST_ERROR_MESSAGE,
+		IFNULL(DATE_FORMAT(LAST_ERROR_TIMESTAMP, '%Y-%m-%d %H:%i:%s.%f'), '') AS LAST_ERROR_TIMESTAMP
+	FROM performance_schema.replication_applier_status_by_worker
+	ORDER BY CHANNEL_NAME, WORKER_ID`
+	if wrows, werr := db.Query(workerSQL); werr == nil {
+		for wrows.Next() {
+			var w ReplicaWorkerStatus
+			var chanName, errMsg, errTs sql.NullString
+			var errNum sql.NullInt64
+			if scanErr := wrows.Scan(&chanName, &w.WorkerID, &errNum, &errMsg, &errTs); scanErr == nil {
+				if chanName.Valid {
+					w.ChannelName = chanName.String
+				}
+				if errNum.Valid {
+					w.LastErrorNumber = strconv.FormatInt(errNum.Int64, 10)
+				} else {
+					w.LastErrorNumber = "0"
+				}
+				if errMsg.Valid {
+					w.LastErrorMessage = errMsg.String
+				}
+				if errTs.Valid {
+					w.LastErrorTimestamp = errTs.String
+				}
+				data.ReplicaWorkers = append(data.ReplicaWorkers, w)
+			} else {
+				log.Printf("[replication_applier_status_by_worker] scan error: %v", scanErr)
+			}
+		}
+		wrows.Close()
+	} else {
+		log.Printf("[replication_applier_status_by_worker] query error: %v", werr)
+	}
+
+	// ── NEW: GTID State ──────────────────────────────────────────────────────
+	// Mirrors: SELECT * FROM performance_schema.global_variables
+	//          WHERE Variable_name IN ('gtid_executed','gtid_purged')
+	gtidSQL := `SELECT VARIABLE_NAME, IFNULL(VARIABLE_VALUE, '') AS VARIABLE_VALUE
+	FROM performance_schema.global_variables
+	WHERE VARIABLE_NAME IN ('gtid_executed', 'gtid_purged')
+	ORDER BY VARIABLE_NAME`
+	if grows, gerr := db.Query(gtidSQL); gerr == nil {
+		for grows.Next() {
+			var name, value string
+			if scanErr := grows.Scan(&name, &value); scanErr == nil {
+				switch strings.ToLower(name) {
+				case "gtid_executed":
+					data.GTIDInfo.GTIDExecuted = value
+				case "gtid_purged":
+					data.GTIDInfo.GTIDPurged = value
+				}
+			}
+		}
+		grows.Close()
+	} else {
+		log.Printf("[gtid_state] query error: %v", gerr)
 	}
 
 	// Connected Group Replication node list
@@ -803,53 +1470,325 @@ func main() {
 		}
 	}
 
+	// ── NEW: wsrep_provider_options — parse into key/value table rows ────────
+	// SELECT * FROM performance_schema.global_variables
+	//   WHERE variable_name LIKE '%wsrep_provider_options%'
+	var wsrepRaw string
+	_ = db.QueryRow(`SELECT IFNULL(VARIABLE_VALUE,'') FROM performance_schema.global_variables
+		WHERE VARIABLE_NAME = 'wsrep_provider_options'`).Scan(&wsrepRaw)
+	if wsrepRaw != "" {
+		// Parse "key = value; key = value; …" format
+		parts := strings.Split(wsrepRaw, ";")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			eqIdx := strings.Index(part, "=")
+			if eqIdx < 0 {
+				continue
+			}
+			k := strings.TrimSpace(part[:eqIdx])
+			v := strings.TrimSpace(part[eqIdx+1:])
+			data.WsrepProviderOptions = append(data.WsrepProviderOptions, WsrepProviderOption{k, v})
+			// Extract key fc fields for the queue comparison alert
+			switch k {
+			case "gcs.fc_limit":
+				data.WsrepQueueMax.FCLimit = v
+			case "gcs.fc_master_slave":
+				data.WsrepQueueMax.FCMasterSlave = v
+			case "gcs.fc_single_primary":
+				data.WsrepQueueMax.FCSinglePrimary = v
+			}
+		}
+	}
+
+	// ── NEW: wsrep_local_recv_queue + wsrep_local_recv_queue_max ─────────────
+	// SELECT * FROM performance_schema.global_status
+	//   WHERE Variable_name IN ('wsrep_local_recv_queue','wsrep_local_recv_queue_max')
+	_ = db.QueryRow(`SELECT IFNULL(VARIABLE_VALUE,'0') FROM performance_schema.global_status
+		WHERE VARIABLE_NAME = 'wsrep_local_recv_queue'`).Scan(&data.WsrepQueueMax.RecvQueue)
+	_ = db.QueryRow(`SELECT IFNULL(VARIABLE_VALUE,'0') FROM performance_schema.global_status
+		WHERE VARIABLE_NAME = 'wsrep_local_recv_queue_max'`).Scan(&data.WsrepQueueMax.RecvQueueMax)
+	// Alert if recv_queue_max >= fc_limit (user's rule #1)
+	if data.WsrepQueueMax.FCLimit != "" && data.WsrepQueueMax.RecvQueueMax != "" {
+		fcLimitN, _ := strconv.Atoi(data.WsrepQueueMax.FCLimit)
+		recvMaxN, _ := strconv.Atoi(data.WsrepQueueMax.RecvQueueMax)
+		if fcLimitN > 0 && recvMaxN >= fcLimitN {
+			data.WsrepQueueMax.Alert = true
+		}
+	}
+
+	// ── NEW: Group Replication flow control + consistency config ─────────────
+	// SELECT * FROM performance_schema.global_variables
+	//   WHERE variable_name IN ('group_replication_communication_stack',
+	//     'group_replication_consistency',
+	//     'group_replication_flow_control_applier_threshold',
+	//     'group_replication_flow_control_certifier_threshold',
+	//     'group_replication_flow_control_mode',
+	//     'group_replication_bootstrap_group')
+	grCfgRows, grCfgErr := db.Query(`
+		SELECT VARIABLE_NAME, IFNULL(VARIABLE_VALUE,'') AS VARIABLE_VALUE
+		FROM performance_schema.global_variables
+		WHERE VARIABLE_NAME IN (
+			'group_replication_bootstrap_group',
+			'group_replication_communication_stack',
+			'group_replication_consistency',
+			'group_replication_flow_control_applier_threshold',
+			'group_replication_flow_control_certifier_threshold',
+			'group_replication_flow_control_mode'
+		)
+		ORDER BY VARIABLE_NAME`)
+	if grCfgErr == nil {
+		for grCfgRows.Next() {
+			var k, v string
+			if grCfgRows.Scan(&k, &v) == nil {
+				switch k {
+				case "group_replication_bootstrap_group":
+					data.GRFlowConfig.BootstrapGroup = v
+				case "group_replication_communication_stack":
+					data.GRFlowConfig.CommStack = v
+				case "group_replication_consistency":
+					data.GRFlowConfig.Consistency = v
+				case "group_replication_flow_control_applier_threshold":
+					data.GRFlowConfig.ApplierThreshold = v
+				case "group_replication_flow_control_certifier_threshold":
+					data.GRFlowConfig.CertThreshold = v
+				case "group_replication_flow_control_mode":
+					data.GRFlowConfig.FlowControlMode = v
+				}
+			}
+		}
+		grCfgRows.Close()
+	}
+
 	// Final Summary Cluster Flow Control assignment
 	if !isClusterConfigured {
 		data.Summary.ClusterFlowControl = "Not Configured / Single Instance"
 	} else {
 		data.Summary.ClusterFlowControl = clusterFCStatus
 	}
+	// #region agent log
+	debugLog("D", "main.go:cluster-fc", "cluster flow control summary resolved", map[string]interface{}{
+		"isClusterConfigured": isClusterConfigured,
+		"clusterFCStatus":     clusterFCStatus,
+		"grFCActiveSet":       data.GRFlowControlLimit != "",
+		"galeraFCSet":         data.GaleraFlowControl != "",
+		"grQueueCount":        len(data.GRQueues),
+	})
+	// #endregion
 
-	// Fetch JSON configurations from mysql_innodb_cluster metadata schemas
+	// Cluster name from metadata registry (schema mysql_innodb_cluster_metadata only).
+	// Note: there is no mysql_innodb_cluster database, and metadata tables do not
+	// store Shell status() JSON — that comes from mysqlsh below.
 	var clusterNameVal string
-	err = db.QueryRow("SELECT cluster_name FROM mysql_innodb_cluster_metadata.v2_clusters LIMIT 1;").Scan(&clusterNameVal)
-	if err != nil {
-		err = db.QueryRow("SELECT cluster_name FROM mysql_innodb_cluster.clusters LIMIT 1;").Scan(&clusterNameVal)
+	for _, q := range []string{
+		"SELECT cluster_name FROM mysql_innodb_cluster_metadata.clusters LIMIT 1",
+		"SELECT cluster_name FROM mysql_innodb_cluster_metadata.v2_gr_clusters LIMIT 1",
+	} {
+		if err := db.QueryRow(q).Scan(&clusterNameVal); err == nil && clusterNameVal != "" {
+			break
+		}
 	}
 	if clusterNameVal == "" {
-		clusterNameVal = "testcluster"
+		clusterNameVal = "cluster"
 	}
 
-	var clusterJSON string
-	clusterQueries := []string{
-		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster_metadata.v2_clusters LIMIT 1;",
-		"SELECT status FROM mysql_innodb_cluster_metadata.v2_clusters LIMIT 1;",
-		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster.clusters LIMIT 1;",
-		"SELECT status FROM mysql_innodb_cluster.clusters LIMIT 1;",
-	}
-	for _, q := range clusterQueries {
-		if err := db.QueryRow(q).Scan(&clusterJSON); err == nil && clusterJSON != "" {
-			data.ClusterStatus = clusterJSON
-			break
+	// ── InnoDB Cluster & ClusterSet topology ─────────────────────────────────
+	// Step 1: Check if this server is part of an InnoDB Cluster/ClusterSet (pure SQL).
+	// Step 2: If yes, auto-spawn mysqlsh with the same credentials to get the rich
+	//         status JSON (listRouters, routingOptions, status({extended:1})).
+	//         No extra flag needed — command stays:
+	//         ./mysql_gather --user=root --password=x --host=h --port=p
+	var isInnoDBCluster bool
+	db.QueryRow(`SELECT COUNT(*) > 0 FROM information_schema.schemata
+		WHERE schema_name = 'mysql_innodb_cluster_metadata'`).Scan(&isInnoDBCluster)
+
+	if isInnoDBCluster {
+		log.Println("[InnoDB] Cluster metadata detected — attempting mysqlsh for rich topology...")
+		uri := fmt.Sprintf("%s@%s:%d", *user, *host, *port)
+
+		// Single JS call: try ClusterSet first, fall back to single Cluster.
+		// All three API calls (status, listRouters, routingOptions) in one exec.
+		jsCode := `
+var out = { type: "none" };
+try {
+  var cs = dba.getClusterSet();
+  out.type     = "clusterset";
+  out.status   = cs.status({extended:1});
+  out.routers  = cs.listRouters();
+  out.routing  = cs.routingOptions();
+} catch(eCS) {
+  try {
+    var cl = dba.getCluster();
+    out.type    = "cluster";
+    out.status  = cl.status({extended:1});
+    out.routers = cl.listRouters();
+    out.routing = cl.routingOptions();
+  } catch(eCL) {
+    out.type  = "none";
+    out.error = eCL.message;
+  }
+}
+print(JSON.stringify(out));
+`
+		raw, execErr := csRunMysqlsh("mysqlsh", uri, *password, jsCode)
+		if execErr != nil {
+			// mysqlsh not installed or unreachable — fall back to pure SQL silently
+			log.Printf("[InnoDB] mysqlsh unavailable (%v) — using SQL fallback", execErr)
+			data.ClusterSetTopology, data.SingleClusterTopo = collectInnoDBTopologySQL(db)
+			// #region agent log
+			debugLog("E", "main.go:mysqlsh-fallback", "SQL fallback after mysqlsh failure", map[string]interface{}{
+				"execErr":              execErr.Error(),
+				"gotClusterSetTopology": data.ClusterSetTopology != nil,
+				"gotSingleClusterTopo": data.SingleClusterTopo != nil,
+			})
+			// #endregion
+			data.CSRoutingOptions = collectRoutingOptionsSQL(db)
+		} else if len(raw) > 2 {
+			var wrapper struct {
+				Type    string          `json:"type"`
+				Error   string          `json:"error"`
+				Status  json.RawMessage `json:"status"`
+				Routers json.RawMessage `json:"routers"`
+				Routing json.RawMessage `json:"routing"`
+			}
+			if jsonErr := json.Unmarshal(raw, &wrapper); jsonErr != nil {
+				log.Printf("[InnoDB] JSON parse error: %v — using SQL fallback", jsonErr)
+				data.ClusterSetTopology, data.SingleClusterTopo = collectInnoDBTopologySQL(db)
+			} else {
+				switch wrapper.Type {
+				case "clusterset":
+					data.ClusterSetStatus = prettyJSONRaw(wrapper.Status)
+					if topo, pErr := parseClusterSetJSON(wrapper.Status); pErr == nil {
+						data.ClusterSetTopology = topo
+						log.Printf("[InnoDB] ClusterSet: domain=%s primary=%s status=%s",
+							topo.DomainName, topo.PrimaryCluster, topo.Status)
+					}
+				case "cluster":
+					data.ClusterStatus = prettyJSONRaw(wrapper.Status)
+					if topo, pErr := parseClusterSetJSON(wrapper.Status); pErr == nil {
+						data.SingleClusterTopo = topo
+						log.Printf("[InnoDB] Single cluster: primary=%s status=%s",
+							topo.GlobalPrimaryInstance, topo.Status)
+					}
+				default:
+					// Neither ClusterSet nor Cluster via mysqlsh — use SQL
+					data.ClusterSetTopology, data.SingleClusterTopo = collectInnoDBTopologySQL(db)
+				}
+				// Routers from mysqlsh
+				if len(wrapper.Routers) > 2 {
+					if routers, rErr := parseRouterList(wrapper.Routers); rErr == nil {
+						data.CSRouters = routers
+					}
+				}
+				// Routing options from mysqlsh
+				if len(wrapper.Routing) > 2 {
+					if opts, oErr := parseRoutingOptions(wrapper.Routing); oErr == nil {
+						data.CSRoutingOptions = opts
+					}
+				}
+			}
 		}
 	}
 
-	var clusterSetJSON string
-	clusterSetQueries := []string{
-		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster_metadata.v2_clustersets LIMIT 1;",
-		"SELECT status FROM mysql_innodb_cluster_metadata.v2_clustersets LIMIT 1;",
-		"SELECT JSON_PRETTY(status) FROM mysql_innodb_cluster.clustersets LIMIT 1;",
-		"SELECT status FROM mysql_innodb_cluster.clustersets LIMIT 1;",
-	}
-	for _, q := range clusterSetQueries {
-		if err := db.QueryRow(q).Scan(&clusterSetJSON); err == nil && clusterSetJSON != "" {
-			data.ClusterSetStatus = clusterSetJSON
-			break
+	// Merge router sources into one unified CSRouters list.
+	// Priority: mysqlsh listRouters() is richer (has TargetCluster).
+	// SQL metadata fills in anything mysqlsh didn't provide.
+	// Deduplicate by RouterKey / router name so nothing appears twice.
+	sqlRouters := queryRouterMetadata(db)
+	if len(data.CSRouters) == 0 {
+		// mysqlsh gave nothing — convert SQL rows to CSRouter
+		for _, r := range sqlRouters {
+			data.CSRouters = append(data.CSRouters, CSRouter{
+				RouterKey:   r.RouterName,
+				Hostname:    r.Address,
+				Version:     r.Version,
+				LastCheckIn: r.LastCheckIn,
+				RWPort:      r.RWPort,
+				ROPort:      r.ROPort,
+				RWXPort:     r.RWXPort,
+				ROXPort:     r.ROXPort,
+			})
+		}
+	} else {
+		// mysqlsh gave data — backfill MetadataUser from SQL where missing
+		sqlByName := map[string]RouterDetails{}
+		for _, r := range sqlRouters {
+			sqlByName[r.RouterName] = r
+		}
+		for i, cr := range data.CSRouters {
+			// Router1 key from mysqlsh is "hostname::Router1"; extract the name part
+			namePart := cr.RouterKey
+			if idx := strings.LastIndex(namePart, "::"); idx >= 0 {
+				namePart = namePart[idx+2:]
+			}
+			if sqlR, ok := sqlByName[namePart]; ok {
+				if data.CSRouters[i].RWSplitPort == "" {
+					data.CSRouters[i].RWSplitPort = sqlR.RWSplitPort
+				}
+			}
 		}
 	}
+	// Deduplicate: if mysqlsh returned both "hostname::" (blank name) and
+	// "hostname::RouterName", keep only the named entry.
+	seen := map[string]bool{}
+	var deduped []CSRouter
+	for _, r := range data.CSRouters {
+		key := r.RouterKey
+		if strings.HasSuffix(key, "::") {
+			// blank router name — skip if a named version exists
+			prefix := strings.TrimSuffix(key, "::")
+			hasBetter := false
+			for _, other := range data.CSRouters {
+				if other.RouterKey != key && strings.HasPrefix(other.RouterKey, prefix+"::") {
+					hasBetter = true
+					break
+				}
+			}
+			if hasBetter { continue }
+		}
+		if !seen[key] {
+			seen[key] = true
+			deduped = append(deduped, r)
+		}
+	}
+	data.CSRouters = deduped
+	data.Routers = nil // clear SQL list — CSRouters is now the single source
 
-	// Final Router metadata extraction using dynamic JOIN queries
-	data.Routers = queryRouterMetadata(db)
+	// Routing options
+	if data.CSRoutingOptions == nil {
+		data.CSRoutingOptions = collectRoutingOptionsSQL(db)
+	}
+
+	// #region agent log
+	innoDBOuterGate := data.ClusterStatus != "" || data.ClusterSetStatus != "" || data.ClusterSetTopology != nil || len(data.Routers) > 0
+	singleTopoNodes := 0
+	if data.SingleClusterTopo != nil && data.SingleClusterTopo.PrimaryClusterData != nil {
+		singleTopoNodes = len(data.SingleClusterTopo.PrimaryClusterData.Nodes)
+	}
+	csTopoNodes := 0
+	if data.ClusterSetTopology != nil && data.ClusterSetTopology.PrimaryClusterData != nil {
+		csTopoNodes = len(data.ClusterSetTopology.PrimaryClusterData.Nodes)
+	}
+	debugLog("A", "main.go:innoDB-gate", "InnoDB Cluster HTML outer gate evaluation", map[string]interface{}{
+		"outerGateWouldOpen":   innoDBOuterGate,
+		"hasClusterStatus":     data.ClusterStatus != "",
+		"hasClusterSetStatus":  data.ClusterSetStatus != "",
+		"hasClusterSetTopology": data.ClusterSetTopology != nil,
+		"hasSingleClusterTopo": data.SingleClusterTopo != nil,
+		"singleTopoNodes":      singleTopoNodes,
+		"csTopoNodes":          csTopoNodes,
+		"routersLen":           len(data.Routers),
+		"hiddenSingleTopoBug":  data.SingleClusterTopo != nil && !innoDBOuterGate,
+	})
+	debugLog("B", "main.go:router-gate", "MySQL Router HTML gate evaluation", map[string]interface{}{
+		"csRoutersCount":       len(data.CSRouters),
+		"hasCSRoutingOptions":  data.CSRoutingOptions != nil,
+		"routerInnerGateOpen":  len(data.CSRouters) > 0 || data.CSRoutingOptions != nil,
+		"hiddenRouterBug":      (len(data.CSRouters) > 0 || data.CSRoutingOptions != nil) && !innoDBOuterGate,
+	})
+	// #endregion
 
 	// Section 6: Current Binary Log Status
 	binlogRows, bErr := db.Query("SHOW BINARY LOG STATUS;")
@@ -1338,6 +2277,85 @@ func main() {
 		}
 	}
 
+	// Rule 10: PXC — wsrep_local_recv_queue_max vs gcs.fc_limit comparison
+	// If recv_queue_max >= fc_limit, the node has already hit the flow-control ceiling.
+	// Also recommend enabling gcs.fc_master_slave / gcs.fc_single_primary when writes
+	// are only performed on a single PXC node.
+	if data.WsrepQueueMax.FCLimit != "" {
+		fcLimitN, _ := strconv.Atoi(strings.TrimSpace(data.WsrepQueueMax.FCLimit))
+		recvMaxN, _ := strconv.Atoi(strings.TrimSpace(data.WsrepQueueMax.RecvQueueMax))
+		recvCurN, _ := strconv.Atoi(strings.TrimSpace(data.WsrepQueueMax.RecvQueue))
+
+		if fcLimitN > 0 && recvMaxN >= fcLimitN {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "CRITICAL",
+				Parameter: "gcs.fc_limit (wsrep_provider_options)",
+				Description: fmt.Sprintf(
+					"wsrep_local_recv_queue_max (%d) has reached or exceeded gcs.fc_limit (%d). "+
+						"This means the receive queue has already triggered flow control at its current ceiling. "+
+						"Increase gcs.fc_limit in wsrep_provider_options (e.g. SET GLOBAL wsrep_provider_options='gcs.fc_limit=200') "+
+						"to give the cluster more headroom before throttling writes.",
+					recvMaxN, fcLimitN),
+			})
+		} else if fcLimitN > 0 && recvCurN > 0 && float64(recvCurN)/float64(fcLimitN) > 0.75 {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "gcs.fc_limit (wsrep_provider_options)",
+				Description: fmt.Sprintf(
+					"wsrep_local_recv_queue (%d) is above 75%% of gcs.fc_limit (%d). "+
+						"Flow control may activate soon if applier lag increases further. "+
+						"Monitor closely and consider increasing gcs.fc_limit.",
+					recvCurN, fcLimitN),
+			})
+		}
+
+		// Recommend fc_master_slave / fc_single_primary if not already enabled
+		// and writes are on a single node (standard PXC deployment)
+		fcMS := strings.ToLower(strings.TrimSpace(data.WsrepQueueMax.FCMasterSlave))
+		fcSP := strings.ToLower(strings.TrimSpace(data.WsrepQueueMax.FCSinglePrimary))
+		if (fcMS == "no" || fcMS == "") && (fcSP == "no" || fcSP == "") {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "INFO",
+				Parameter: "gcs.fc_master_slave / gcs.fc_single_primary (wsrep_provider_options)",
+				Description: "Both gcs.fc_master_slave and gcs.fc_single_primary are currently set to 'no'. " +
+					"If your application performs writes exclusively on one PXC node (single-writer topology), " +
+					"enabling either of these options disables flow control on the writer node and significantly " +
+					"reduces unnecessary replication stalls. " +
+					"Set via: SET GLOBAL wsrep_provider_options='gcs.fc_single_primary=yes'; " +
+					"(or gcs.fc_master_slave=yes for older Galera versions).",
+			})
+		}
+	}
+
+	// Rule 11: Group Replication — flag non-default flow control mode or low thresholds
+	if data.GRFlowConfig.FlowControlMode != "" {
+		if data.GRFlowConfig.FlowControlMode == "DISABLED" {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "group_replication_flow_control_mode",
+				Description: "Group Replication flow control is DISABLED. Without flow control, a slow secondary " +
+					"node will fall arbitrarily far behind the primary, risking data inconsistency under heavy write load. " +
+					"Unless deliberately tuned for high-throughput benchmarking, set flow_control_mode=QUOTA.",
+			})
+		}
+
+		applierT, _ := strconv.Atoi(strings.TrimSpace(data.GRFlowConfig.ApplierThreshold))
+		certT, _    := strconv.Atoi(strings.TrimSpace(data.GRFlowConfig.CertThreshold))
+		if applierT > 0 && certT > 0 {
+			if applierT > 100000 || certT > 100000 {
+				data.Recommendations = append(data.Recommendations, Recommendation{
+					Type:      "WARNING",
+					Parameter: "group_replication_flow_control_applier/certifier_threshold",
+					Description: fmt.Sprintf(
+						"GR flow control thresholds are very high (applier=%d, certifier=%d). "+
+							"These values delay flow control activation, allowing large backlogs to build before "+
+							"throttling begins. Review whether these values are intentional for your workload.",
+						applierT, certT),
+				})
+			}
+		}
+	}
+
 	// Check History List Length purge metric
 	for _, m := range data.EngineMetrics {
 		if m.Key == "History list length" {
@@ -1368,7 +2386,15 @@ func main() {
 	}
 	defer outFile.Close()
 
-	tmpl, err := template.New("report").Parse(htmlTemplate)
+	tmpl, err := template.New("report").Funcs(template.FuncMap{
+		"toInt": func(s string) int {
+			n, _ := strconv.Atoi(strings.TrimSpace(s))
+			return n
+		},
+		"mod3": func(i int) int {
+			return i % 3
+		},
+	}).Parse(htmlTemplate)
 	if err != nil {
 		log.Fatalf("Failed to compile layout elements: %v", err)
 	}
@@ -1386,179 +2412,324 @@ const htmlTemplate = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MySQL Gather Report</title>
+    <title>mysql_gather — Database Health Report</title>
     <style>
+        /* ── Reset & Base ─────────────────────────────────────── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: Menlo, Monaco, Consolas, "Courier New", monospace, -apple-system, BlinkMacSystemFont, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             font-size: 12px;
-            line-height: 1.4;
-            color: #000;
-            background-color: #fff;
-            margin: 15px;
+            line-height: 1.5;
+            color: #1a202c;
+            background: #f0f4f8;
         }
-        h1 {
-            font-size: 20px;
-            font-weight: bold;
-            color: #000;
-            margin: 0 0 5px 0;
-            border-bottom: 2px solid #000;
-            padding-bottom: 5px;
+
+        /* ── Top Header Bar ───────────────────────────────────── */
+        .top-bar {
+            background: linear-gradient(135deg, #1a365d 0%, #2b6cb0 100%);
+            color: #fff;
+            padding: 0 28px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 54px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 2px 8px rgba(0,0,0,.25);
         }
-        h2 {
-            font-size: 15px;
-            font-weight: bold;
-            color: #1a365d;
-            margin: 25px 0 10px 0;
-            border-bottom: 1.5px solid #000;
-            padding-bottom: 2px;
+        .top-bar-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-        h3 {
-            font-size: 13px;
-            margin: 15px 0 5px 0;
-            color: #2b6cb0;
+        .top-bar-logo {
+            font-size: 22px;
+            line-height: 1;
         }
-        p {
-            margin: 0 0 10px 0;
+        .top-bar-title {
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: .5px;
+            font-family: Menlo, "Courier New", monospace;
         }
-        a {
-            color: #0044cc;
+        .top-bar-sub {
+            font-size: 11px;
+            opacity: .75;
+            margin-left: 4px;
+            font-weight: 400;
+        }
+        .top-bar-meta {
+            font-size: 11px;
+            opacity: .85;
+            text-align: right;
+            line-height: 1.6;
+        }
+
+        /* ── Section Nav Pills ────────────────────────────────── */
+        .sec-nav {
+            background: #fff;
+            border-bottom: 1px solid #cbd5e0;
+            padding: 0 28px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2px 0;
+            align-items: center;
+            position: sticky;
+            top: 54px;
+            z-index: 99;
+            box-shadow: 0 1px 4px rgba(0,0,0,.06);
+        }
+        .sec-nav a {
+            display: inline-block;
+            padding: 8px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #4a5568;
             text-decoration: none;
+            border-bottom: 3px solid transparent;
+            white-space: nowrap;
+            transition: color .15s, border-color .15s;
         }
-        a:hover {
-            text-decoration: underline;
+        .sec-nav a:hover {
+            color: #2b6cb0;
+            border-bottom-color: #2b6cb0;
         }
-        ul.sections-list {
-            padding-left: 0;
-            list-style: none;
-            margin: 10px 0 20px 0;
+        .sec-nav-sep {
+            color: #cbd5e0;
+            padding: 0 2px;
+            font-size: 11px;
         }
-        ul.sections-list li {
-            display: inline;
-            margin-right: 15px;
+
+        /* ── Main Content Area ────────────────────────────────── */
+        .content {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px 28px 40px;
         }
-        ul.sections-list li::after {
-            content: " |";
-            color: #999;
-            margin-left: 10px;
+
+        /* ── Section Card ─────────────────────────────────────── */
+        .sec-card {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            margin-bottom: 14px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.06);
+            overflow: hidden;
         }
-        ul.sections-list li:last-child::after {
-            content: "";
+        .sec-hdr {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 11px 16px;
+            cursor: pointer;
+            user-select: none;
+            background: #f7fafc;
+            border-bottom: 1px solid #e2e8f0;
+            transition: background .15s;
         }
+        .sec-hdr:hover { background: #edf2f7; }
+        .sec-hdr-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .sec-num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            background: #2b6cb0;
+            color: #fff;
+            border-radius: 50%;
+            font-size: 10px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .sec-hdr h2 {
+            font-size: 13px;
+            font-weight: 700;
+            color: #1a365d;
+            margin: 0;
+            border: none;
+            padding: 0;
+        }
+        .sec-toggle {
+            font-size: 10px;
+            font-weight: 600;
+            color: #4a5568;
+            background: #edf2f7;
+            border: 1px solid #cbd5e0;
+            border-radius: 4px;
+            padding: 3px 10px;
+            cursor: pointer;
+            white-space: nowrap;
+            font-family: inherit;
+            transition: background .15s;
+        }
+        .sec-toggle:hover { background: #e2e8f0; color: #2b6cb0; }
+        .sec-body { padding: 16px; }
+        .sec-body.collapsed { display: none; }
+
+        /* ── Typography inside sections ───────────────────────── */
+        h3 {
+            font-size: 12px;
+            font-weight: 700;
+            color: #2b6cb0;
+            margin: 14px 0 6px 0;
+            padding-bottom: 3px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        h4 {
+            font-size: 11px;
+            font-weight: 700;
+            color: #4a5568;
+            margin: 10px 0 4px 0;
+        }
+        h5 {
+            font-size: 11px;
+            font-weight: 600;
+            color: #718096;
+            margin: 8px 0 4px 0;
+        }
+        p { margin: 0 0 8px 0; }
+        a { color: #2b6cb0; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        code {
+            font-family: Menlo, "Courier New", monospace;
+            font-size: 10.5px;
+            background: #edf2f7;
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
+
+        /* ── Tables ───────────────────────────────────────────── */
         table {
             border-collapse: collapse;
             width: 100%;
-            margin-bottom: 20px;
+            margin-bottom: 16px;
             font-size: 11px;
-            border: 1px solid #777;
+            border: 1px solid #cbd5e0;
+            border-radius: 4px;
+            overflow: hidden;
         }
         th, td {
-            border: 1px solid #aaa;
-            padding: 4px 6px;
+            border: 1px solid #e2e8f0;
+            padding: 5px 8px;
             text-align: left;
             vertical-align: top;
         }
         th {
-            background-color: #d1e2ff;
-            font-weight: bold;
-            color: #000;
+            background: #ebf4ff;
+            font-weight: 700;
+            color: #1a365d;
+            font-size: 10.5px;
+            white-space: nowrap;
         }
-        tr:nth-child(even) {
-            background-color: #f6f9fe;
-        }
+        tr:nth-child(even) td { background: #f7faff; }
+        tr:hover td { background: #ebf8ff !important; }
+
+        /* ── Pre / Code blocks ────────────────────────────────── */
         pre {
-            background-color: #f9f9f9;
-            border: 1px dashed #777;
-            padding: 8px;
-            font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
-            font-size: 11px;
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+            padding: 10px 12px;
+            font-family: Menlo, "Courier New", monospace;
+            font-size: 10.5px;
             overflow-x: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
-            margin: 10px 0;
+            margin: 8px 0;
+            line-height: 1.6;
         }
-        .text-right {
-            text-align: right;
-        }
+
+        /* ── Badges ───────────────────────────────────────────── */
         .badge {
             display: inline-block;
-            padding: 1px 4px;
-            font-weight: bold;
+            padding: 2px 6px;
+            font-weight: 700;
             font-size: 9px;
-            border-radius: 2px;
+            border-radius: 10px;
             text-transform: uppercase;
+            letter-spacing: .3px;
         }
-        .badge-critical {
-            background-color: #ffd8d8;
-            color: #900;
-            border: 1px solid #f88;
-        }
-        .badge-warning {
-            background-color: #ffe8b8;
-            color: #850;
-            border: 1px solid #e2a050;
-        }
-        .badge-ok {
-            background-color: #d5ffd5;
-            color: #060;
-            border: 1px solid #8e8;
-        }
+        .badge-critical { background: #fed7d7; color: #822727; border: 1px solid #fc8181; }
+        .badge-warning  { background: #fefcbf; color: #744210; border: 1px solid #f6e05e; }
+        .badge-ok       { background: #c6f6d5; color: #22543d; border: 1px solid #68d391; }
+
+        /* ── Misc ─────────────────────────────────────────────── */
+        .text-right { text-align: right; }
         .search-box {
-            width: 100%;
-            max-width: 300px;
-            padding: 3px 6px;
-            border: 1px solid #777;
+            padding: 4px 8px;
+            border: 1px solid #cbd5e0;
+            border-radius: 4px;
             font-size: 11px;
             font-family: inherit;
-            margin-bottom: 5px;
+            margin-bottom: 8px;
+            width: 100%;
+            max-width: 280px;
+            outline: none;
         }
-        footer {
-            margin-top: 40px;
-            font-size: 10px;
-            color: #555;
-            border-top: 1px solid #999;
-            padding-top: 5px;
-        }
+        .search-box:focus { border-color: #2b6cb0; box-shadow: 0 0 0 2px rgba(43,108,176,.15); }
         .recommendation-card {
             border-left: 4px solid #aaa;
-            padding-left: 10px;
-            margin-bottom: 12px;
+            padding: 8px 12px;
+            margin-bottom: 10px;
+            border-radius: 0 4px 4px 0;
         }
-        .rec-CRITICAL {
-            border-left-color: #d9534f;
-            background-color: #fff5f5;
-        }
-        .rec-WARNING {
-            border-left-color: #f0ad4e;
-            background-color: #fcf8e3;
-        }
-        .rec-INFO {
-            border-left-color: #5bc0de;
-            background-color: #f4f9fa;
+        .rec-CRITICAL { border-left-color: #e53e3e; background: #fff5f5; }
+        .rec-WARNING  { border-left-color: #dd6b20; background: #fffaf0; }
+        .rec-INFO     { border-left-color: #3182ce; background: #ebf8ff; }
+        footer {
+            text-align: center;
+            margin-top: 32px;
+            padding: 12px;
+            font-size: 10px;
+            color: #718096;
+            border-top: 1px solid #e2e8f0;
         }
     </style>
 </head>
 <body>
 
-    <h1>🐬 MySQL Gather Report</h1>
-    
-    <div id="Sections">
-        <strong>Sections:</strong>
-        <ul class="sections-list">
-            <li><a href="#summary">1. System Summary</a></li>
-            <li><a href="#config">2. Critical Configurations</a></li>
-            <li><a href="#status">3. Performance Metrics</a></li>
-            <li><a href="#innodb">4. Storage Engine State</a></li>
-            <li><a href="#replication">5. HA &amp; Replication Topology</a></li>
-            <li><a href="#replica-source">6. Current Binary Log Status</a></li>
-            <li><a href="#process">7. Process List &amp; Query History</a></li>
-            <li><a href="#perf-schema">8. Performance Schema Insights</a></li>
-            <li><a href="#user-details">9. User Details</a></li>
-            <li><a href="#recommendations">10. Optimization Recommendations</a></li>
-        </ul>
+    <!-- ── Top Header ── -->
+    <div class="top-bar">
+        <div class="top-bar-brand">
+            <span class="top-bar-logo">🐬</span>
+            <span class="top-bar-title">mysql_gather<span class="top-bar-sub">/ Database Health Report</span></span>
+        </div>
+        <div class="top-bar-meta">
+            <strong>{{.Summary.Hostname}}</strong> &nbsp;·&nbsp; MySQL {{.Summary.ServerVersion}}<br>
+            Uptime: {{.Summary.Uptime}} &nbsp;·&nbsp; {{.Summary.CollectedAt}}
+        </div>
     </div>
 
+    <!-- ── Section Nav ── -->
+    <div class="sec-nav">
+        <a href="#summary">① System Summary</a><span class="sec-nav-sep">·</span>
+        <a href="#config">② Config Variables</a><span class="sec-nav-sep">·</span>
+        <a href="#status">③ Performance Metrics</a><span class="sec-nav-sep">·</span>
+        <a href="#innodb">④ InnoDB Status</a><span class="sec-nav-sep">·</span>
+        <a href="#replication">⑤ HA &amp; Replication</a><span class="sec-nav-sep">·</span>
+        <a href="#replica-source">⑥ Binary Log</a><span class="sec-nav-sep">·</span>
+        <a href="#process">⑦ Process List</a><span class="sec-nav-sep">·</span>
+        <a href="#perf-schema">⑧ Perf Schema</a><span class="sec-nav-sep">·</span>
+        <a href="#user-details">⑨ User Details</a><span class="sec-nav-sep">·</span>
+        <a href="#recommendations">⑩ Recommendations</a>
+    </div>
+
+    <div class="content">
+
     <!-- 1. System Summary & Engine Metrics -->
-    <h2 id="summary">1. System Summary</h2>
+    </div><!-- end sec-body -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('summary')">
+        <div class="sec-hdr-left"><span class="sec-num">1</span><h2 id="summary">System Summary</h2></div>
+        <button class="sec-toggle" id="btn-summary">▲ Collapse</button>
+    </div>
+    <div class="sec-body" id="body-summary">
     <table style="max-width: 800px; margin-bottom: 15px;">
         <tr>
             <th width="25%">Hostname</th>
@@ -1639,7 +2810,14 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     <!-- 2. Critical Configurations -->
-    <h2 id="config">2. Critical Configurations (SHOW GLOBAL VARIABLES)</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('config')">
+        <div class="sec-hdr-left"><span class="sec-num">2</span><h2 id="config">2. Critical Configurations (SHOW GLOBAL VARIABLES)</h2></div>
+        <button class="sec-toggle" id="btn-config">▼ Expand</button>
+    </div>
+    <div class="sec-body collapsed" id="body-config">
     <p>Filter global configuration variables dynamically:</p>
     <input type="text" id="config-search" class="search-box" placeholder="Filter variables..." onkeyup="filterTable('config-table', 'config-search')">
     <table id="config-table">
@@ -1662,7 +2840,14 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     <!-- 3. Performance Metrics -->
-    <h2 id="status">3. Performance Metrics (SHOW GLOBAL STATUS)</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('status')">
+        <div class="sec-hdr-left"><span class="sec-num">3</span><h2 id="status">3. Performance Metrics (SHOW GLOBAL STATUS)</h2></div>
+        <button class="sec-toggle" id="btn-status">▼ Expand</button>
+    </div>
+    <div class="sec-body collapsed" id="body-status">
     <p>Filter global status parameters dynamically:</p>
     <input type="text" id="status-search" class="search-box" placeholder="Filter status..." onkeyup="filterTable('status-table', 'status-search')">
     <table id="status-table">
@@ -1685,11 +2870,25 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     <!-- 4. Storage Engine State -->
-    <h2 id="innodb">4. Storage Engine State (SHOW ENGINE INNODB STATUS)</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('innodb')">
+        <div class="sec-hdr-left"><span class="sec-num">4</span><h2 id="innodb">4. Storage Engine State (SHOW ENGINE INNODB STATUS)</h2></div>
+        <button class="sec-toggle" id="btn-innodb">▲ Collapse</button>
+    </div>
+    <div class="sec-body" id="body-innodb">
     <pre>{{.InnodbStatus}}</pre>
 
     <!-- 5. HA / Replication Topology Consolidated -->
-    <h2 id="replication">5. HA &amp; Replication Topology</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('replication')">
+        <div class="sec-hdr-left"><span class="sec-num">5</span><h2 id="replication">5. HA &amp; Replication Topology</h2></div>
+        <button class="sec-toggle" id="btn-replication">▲ Collapse</button>
+    </div>
+    <div class="sec-body" id="body-replication">
     
     <h3>Replication Slave / Replica Channels Status</h3>
     {{if .ReplicationStates}}
@@ -1779,38 +2978,119 @@ const htmlTemplate = `<!DOCTYPE html>
     <table><tbody><tr><td>No active replica / replication channels configured on this node.</td></tr></tbody></table>
     {{end}}
 
+    <!-- ═══ GTID State ═══════════════════════════════════════════════════════ -->
+    <h3>GTID State</h3>
+    <table style="max-width:900px; margin-bottom:20px;">
+        <thead>
+            <tr>
+                <th width="18%">VARIABLE_NAME</th>
+                <th>VARIABLE_VALUE</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>gtid_executed</strong></td>
+                <td>
+                    {{if .GTIDInfo.GTIDExecuted}}
+                        <code style="word-break:break-all;font-size:11px;">{{.GTIDInfo.GTIDExecuted}}</code>
+                    {{else}}
+                        <em style="color:#999;">(empty — GTID mode not enabled or no transactions executed yet)</em>
+                    {{end}}
+                </td>
+            </tr>
+            <tr>
+                <td><strong>gtid_purged</strong></td>
+                <td>
+                    {{if .GTIDInfo.GTIDPurged}}
+                        <code style="word-break:break-all;font-size:11px;">{{.GTIDInfo.GTIDPurged}}</code>
+                    {{else}}
+                        <em style="color:#999;">(empty)</em>
+                    {{end}}
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- ═══ Replication Applier Worker Status ═══════════════════════════════ -->
+    <h3>Replication Applier Worker Status</h3>
+    {{if .ReplicaWorkers}}
+    <table style="width:100%; max-width:1200px; margin-bottom:20px;">
+        <thead>
+            <tr>
+                <th style="width:10%;">Channel Name</th>
+                <th style="width:7%;text-align:center;">Worker ID</th>
+                <th style="width:8%;text-align:center;">Last Error #</th>
+                <th style="width:50%;">Last Error Message</th>
+                <th style="width:20%;">Last Error Timestamp</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .ReplicaWorkers}}
+            <tr{{if ne .LastErrorNumber "0"}} style="background-color:#fff5f5;"{{end}}>
+                <td><strong>{{if .ChannelName}}{{.ChannelName}}{{else}}<em style="color:#999;">(default)</em>{{end}}</strong></td>
+                <td style="text-align:center;"><strong>{{.WorkerID}}</strong></td>
+                <td style="text-align:center;">
+                    {{if ne .LastErrorNumber "0"}}
+                        <span style="color:#c00;font-weight:bold;">{{.LastErrorNumber}}</span>
+                    {{else}}
+                        <span style="color:green;font-weight:bold;">0</span>
+                    {{end}}
+                </td>
+                <td style="word-break:break-word;font-size:11px;">
+                    {{if .LastErrorMessage}}
+                        <span style="color:#c00;font-weight:bold;">{{.LastErrorMessage}}</span>
+                    {{else}}
+                        <span style="color:#999;">—</span>
+                    {{end}}
+                </td>
+                <td style="font-size:10px;white-space:nowrap;">
+                    {{if and .LastErrorTimestamp (ne .LastErrorTimestamp "") (ne .LastErrorTimestamp "0000-00-00 00:00:00.000000")}}
+                        <code style="color:#c00;">{{.LastErrorTimestamp}}</code>
+                    {{else}}
+                        <span style="color:#999;">—</span>
+                    {{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <table style="max-width:900px; margin-bottom:20px;"><tbody>
+        <tr><td style="color:#888;font-style:italic;">
+            No rows from performance_schema.replication_applier_status_by_worker.
+            Table is populated only when slave_parallel_workers &gt; 0 and this is a replica.
+        </td></tr>
+    </tbody></table>
+    {{end}}
+
     <h3>Group Replication Members</h3>
-    <table>
+    <table style="max-width:1100px; margin-bottom:20px;">
         <thead>
             <tr>
                 <th>Channel Name</th>
-                <th>Member ID UUID</th>
+                <th>Member ID</th>
                 <th>Member Host</th>
                 <th>Port</th>
-                <th>State</th>
-                <th>Role</th>
+                <th>Member State</th>
+                <th>Member Role</th>
                 <th>Version</th>
             </tr>
         </thead>
         <tbody>
             {{range .GroupMembers}}
             <tr>
-                <td>{{.ChannelName}}</td>
-                <td><small>{{.MemberID}}</small></td>
-                <td><strong>{{.MemberHost}}</strong></td>
-                <td>{{.MemberPort}}</td>
-                <td>
-                    {{if eq .MemberState "ONLINE"}}
-                        <span class="badge badge-ok">ONLINE</span>
-                    {{else}}
-                        <span class="badge badge-critical">{{.MemberState}}</span>
-                    </td>
-                {{end}}
-                <td><strong>{{.MemberRole}}</strong></td>
-                <td>{{.Version}}</td>
+                <td><strong>{{if .ChannelName}}{{.ChannelName}}{{else}}—{{end}}</strong></td>
+                <td style="font-family:monospace;font-size:11px;">{{if .MemberID}}{{.MemberID}}{{else}}—{{end}}</td>
+                <td><strong>{{if .MemberHost}}{{.MemberHost}}{{else}}—{{end}}</strong></td>
+                <td style="text-align:center;">{{if .MemberPort}}{{.MemberPort}}{{else}}—{{end}}</td>
+                <td style="font-weight:bold; {{if eq .MemberState "ONLINE"}}color:green;{{else if .MemberState}}color:#c00;{{end}}">
+                    {{if .MemberState}}{{.MemberState}}{{else}}—{{end}}
+                </td>
+                <td><strong>{{if .MemberRole}}{{.MemberRole}}{{else}}—{{end}}</strong></td>
+                <td>{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
             </tr>
             {{else}}
-            <tr><td colspan="7">No group replication members detected.</td></tr>
+            <tr><td colspan="7" style="color:#888;font-style:italic;">No group replication members detected.</td></tr>
             {{end}}
         </tbody>
     </table>
@@ -1818,26 +3098,62 @@ const htmlTemplate = `<!DOCTYPE html>
     {{if or .GRFlowControlLimit .GRQueues}}
     <h3>Group Replication Queues</h3>
     {{if .GRFlowControlLimit}}
-    <p><strong>{{.GRFlowControlLimit}}</strong></p>
+    <p style="margin-bottom:8px;"><strong>{{.GRFlowControlLimit}}</strong></p>
     {{end}}
-    <table>
+    <table style="max-width:800px; margin-bottom:20px;">
         <thead>
             <tr>
-                <th>Member ID UUID</th>
-                <th>Certifier Queue Size (cert_queue)</th>
-                <th>Applier Queue Size (applier_queue)</th>
+                <th>Member ID</th>
+                <th style="text-align:center;">Cert Queue (certifier)</th>
+                <th style="text-align:center;">Applier Queue</th>
             </tr>
         </thead>
         <tbody>
             {{range .GRQueues}}
             <tr>
-                <td><code>{{.MemberID}}</code></td>
-                <td><strong>{{.CertQueue}}</strong></td>
-                <td><strong>{{.ApplierQueue}}</strong></td>
+                <td style="font-family:monospace;font-size:11px;">{{.MemberID}}</td>
+                <td style="text-align:center; font-weight:bold;
+                    {{if gt .CertQueue 1000}}color:#c00;{{else if gt .CertQueue 100}}color:#d97706;{{else}}color:green;{{end}}">
+                    {{.CertQueue}}
+                </td>
+                <td style="text-align:center; font-weight:bold;
+                    {{if gt .ApplierQueue 1000}}color:#c00;{{else if gt .ApplierQueue 100}}color:#d97706;{{else}}color:green;{{end}}">
+                    {{.ApplierQueue}}
+                </td>
             </tr>
             {{else}}
-            <tr><td colspan="3">No active member stats queues registered.</td></tr>
+            <tr><td colspan="3" style="color:#888;font-style:italic;">No active member queue stats.</td></tr>
             {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    {{if or .GRFlowConfig.CommStack .GRFlowConfig.FlowControlMode}}
+    <h3>Group Replication — Flow Control &amp; Consistency Configuration</h3>
+    <table style="max-width:1200px; margin-bottom:20px;">
+        <thead>
+            <tr>
+                <th>bootstrap_group</th>
+                <th>communication_stack</th>
+                <th>consistency</th>
+                <th>flow_control_mode</th>
+                <th>flow_control_applier_threshold</th>
+                <th>flow_control_certifier_threshold</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>{{if .GRFlowConfig.BootstrapGroup}}{{.GRFlowConfig.BootstrapGroup}}{{else}}—{{end}}</strong></td>
+                <td><strong>{{if .GRFlowConfig.CommStack}}{{.GRFlowConfig.CommStack}}{{else}}—{{end}}</strong></td>
+                <td><strong>{{if .GRFlowConfig.Consistency}}{{.GRFlowConfig.Consistency}}{{else}}—{{end}}</strong></td>
+                <td><strong>{{if .GRFlowConfig.FlowControlMode}}{{.GRFlowConfig.FlowControlMode}}{{else}}—{{end}}</strong></td>
+                <td style="text-align:center; font-weight:bold; {{if gt (toInt .GRFlowConfig.ApplierThreshold) 25000}}color:#c00;{{end}}">
+                    {{if .GRFlowConfig.ApplierThreshold}}{{.GRFlowConfig.ApplierThreshold}}{{else}}—{{end}}
+                </td>
+                <td style="text-align:center; font-weight:bold; {{if gt (toInt .GRFlowConfig.CertThreshold) 25000}}color:#c00;{{end}}">
+                    {{if .GRFlowConfig.CertThreshold}}{{.GRFlowConfig.CertThreshold}}{{else}}—{{end}}
+                </td>
+            </tr>
         </tbody>
     </table>
     {{end}}
@@ -1916,56 +3232,233 @@ const htmlTemplate = `<!DOCTYPE html>
     </script>
     {{end}}
 
-    {{end}}
-
-    {{if or .ClusterStatus .ClusterSetStatus .Routers}}
-    <h3>InnoDB Clusters &amp; ClusterSet Metadata Details</h3>
-    {{if .ClusterStatus}}
-    <p>InnoDB Cluster Status (cluster.status):</p>
-    <pre>{{.ClusterStatus}}</pre>
-    {{end}}
-    
-    {{if .ClusterSetStatus}}
-    <p>InnoDB ClusterSet Status (myclusterset.status):</p>
-    <pre>{{.ClusterSetStatus}}</pre>
-    {{end}}
-
-    {{if .Routers}}
-    <h3>Registered MySQL Router</h3>
-    <table>
+    {{if or .WsrepQueueMax.RecvQueue .WsrepQueueMax.RecvQueueMax}}
+    <h4>Galera Receive Queue vs Flow Control Limit</h4>
+    <table style="max-width:700px; margin-bottom:12px;">
         <thead>
             <tr>
-                <th>Router ID</th>
-                <th>Router Name</th>
-                <th>Label</th>
-                <th>Address</th>
-                <th>Version</th>
-                <th>Last Check-In</th>
-                <th>Endpoints (RW/RO/RWX/ROX/Split)</th>
-                <th>Metadata User</th>
-                <th>Targets</th>
+                <th>VARIABLE_NAME</th>
+                <th>VARIABLE_VALUE</th>
+                <th>gcs.fc_limit</th>
+                <th>Alert</th>
             </tr>
         </thead>
         <tbody>
-            {{range .Routers}}
-            <tr>
-                <td><strong>{{.RouterID}}</strong></td>
-                <td>{{.RouterName}}</td>
-                <td><small>{{.RouterLabel}}</small></td>
-                <td><code>{{.Address}}</code></td>
-                <td>{{.Version}}</td>
-                <td><small>{{.LastCheckIn}}</small></td>
-                <td>
-                    <ul style="margin:0; padding-left:15px; font-family:monospace; font-size:10px;">
-                        <li>RW: {{.RWPort}}</li>
-                        <li>RO: {{.ROPort}}</li>
-                        <li>RWX: {{.RWXPort}}</li>
-                        <li>ROX: {{.ROXPort}}</li>
-                        <li>Split: {{.RWSplitPort}}</li>
-                    </ul>
+            <tr{{if .WsrepQueueMax.Alert}} style="background:#fff0f0;"{{end}}>
+                <td>wsrep_local_recv_queue</td>
+                <td><strong>{{.WsrepQueueMax.RecvQueue}}</strong></td>
+                <td rowspan="2" style="vertical-align:middle;text-align:center;">
+                    <strong>{{if .WsrepQueueMax.FCLimit}}{{.WsrepQueueMax.FCLimit}}{{else}}—{{end}}</strong>
                 </td>
-                <td><code>{{.MetadataUser}}</code></td>
-                <td><span class="badge badge-ok">{{.ReadOnlyTargets}}</span></td>
+                <td rowspan="2" style="vertical-align:middle;text-align:center;">
+                    {{if .WsrepQueueMax.Alert}}
+                        <strong style="color:#c00;">⚠ recv_queue_max ≥ fc_limit — consider increasing gcs.fc_limit</strong>
+                    {{else}}
+                        <span style="color:green;">OK</span>
+                    {{end}}
+                </td>
+            </tr>
+            <tr{{if .WsrepQueueMax.Alert}} style="background:#fff0f0;"{{end}}>
+                <td>wsrep_local_recv_queue_max</td>
+                <td><strong{{if .WsrepQueueMax.Alert}} style="color:#c00;"{{end}}>{{.WsrepQueueMax.RecvQueueMax}}</strong></td>
+            </tr>
+        </tbody>
+    </table>
+    {{end}}
+
+    {{if .WsrepProviderOptions}}
+    <h4>wsrep_provider_options</h4>
+    <div style="display:flex; flex-wrap:wrap; gap:0; border-top:1px solid #6FAEBF; border-left:1px solid #6FAEBF; margin-bottom:20px; max-width:1200px;">
+        {{range .WsrepProviderOptions}}
+        <div style="border-right:1px solid #6FAEBF; border-bottom:1px solid #6FAEBF; padding:4px 10px; min-width:140px; max-width:220px; flex:1;">
+            <div style="font-family:monospace; font-size:10px; color:#1a3a6a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{{.Key}}">{{.Key}}</div>
+            <div style="font-family:monospace; font-size:12px; font-weight:bold; color:#222; word-break:break-all;">{{if .Value}}{{.Value}}{{else}}&nbsp;{{end}}</div>
+        </div>
+        {{end}}
+    </div>
+    {{end}}
+
+    {{end}}
+
+    {{if or .ClusterStatus .ClusterSetStatus .ClusterSetTopology .Routers}}
+    <h3>InnoDB Cluster &amp; ClusterSet Topology</h3>
+
+    {{if .ClusterSetTopology}}
+    {{$topo := .ClusterSetTopology}}
+
+    <!-- ClusterSet Global Summary -->
+    <h4>ClusterSet: {{$topo.DomainName}}</h4>
+    <table style="max-width:700px; margin-bottom:18px;">
+        <thead><tr><th>Property</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>Domain Name</td><td><strong>{{$topo.DomainName}}</strong></td></tr>
+            <tr><td>Global Status</td>
+                <td><strong style="{{if eq $topo.Status "HEALTHY"}}color:green{{else}}color:#c00{{end}}">{{$topo.Status}}</strong></td>
+            </tr>
+            <tr><td>Global Primary Instance</td><td><code>{{$topo.GlobalPrimaryInstance}}</code></td></tr>
+            <tr><td>Primary Cluster (DC)</td><td><strong>{{$topo.PrimaryCluster}}</strong></td></tr>
+            <tr><td>Metadata Server</td><td><code>{{$topo.MetadataServer}}</code></td></tr>
+        </tbody>
+    </table>
+
+    <!-- Primary Cluster -->
+    {{if $topo.PrimaryClusterData}}
+    {{$pc := $topo.PrimaryClusterData}}
+    <h4 style="color:#1a5276;">&#9654; Primary Cluster (DC): {{$pc.Name}}
+        <span style="font-weight:normal;font-size:12px;color:#555;"> — {{$pc.StatusText}}</span>
+    </h4>
+    <table style="max-width:900px; margin-bottom:8px;">
+        <thead>
+            <tr>
+                <th>Node Address</th>
+                <th>Member Role</th>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>Version</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $pc.Nodes}}
+            <tr>
+                <td><code>{{.Address}}</code></td>
+                <td><strong>{{.MemberRole}}</strong></td>
+                <td>{{.Mode}}</td>
+                <td style="font-weight:bold; {{if eq .Status "ONLINE"}}color:green{{else}}color:#c00{{end}}">{{.Status}}</td>
+                <td>{{.Version}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <table style="max-width:700px; margin-bottom:18px;">
+        <tbody>
+            <tr><td style="color:#555;width:200px;">Cluster Role</td><td><strong>{{$pc.ClusterRole}}</strong></td></tr>
+            <tr><td style="color:#555;">Global Status</td>
+                <td><strong style="{{if eq $pc.GlobalStatus "OK"}}color:green{{else}}color:#c00{{end}}">{{$pc.GlobalStatus}}</strong></td>
+            </tr>
+            <tr><td style="color:#555;">Status</td><td><strong>{{$pc.Status}}</strong></td></tr>
+            {{if $pc.TransactionSet}}<tr><td style="color:#555;">Transaction Set (GTID)</td><td><code style="font-size:11px;">{{$pc.TransactionSet}}</code></td></tr>{{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    <!-- Replica Clusters -->
+    {{range $topo.ReplicaClusters}}
+    {{$rc := .}}
+    <h4 style="color:#922b21;">&#9654; Secondary Cluster (DR): {{$rc.Name}}
+        <span style="font-weight:normal;font-size:12px;color:#555;"> — {{$rc.StatusText}}</span>
+    </h4>
+    <table style="max-width:900px; margin-bottom:8px;">
+        <thead>
+            <tr>
+                <th>Node Address</th>
+                <th>Member Role</th>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>Version</th>
+                <th>Replication Lag</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $rc.Nodes}}
+            <tr>
+                <td><code>{{.Address}}</code></td>
+                <td><strong>{{.MemberRole}}</strong></td>
+                <td>{{.Mode}}</td>
+                <td style="font-weight:bold; {{if eq .Status "ONLINE"}}color:green{{else}}color:#c00{{end}}">{{.Status}}</td>
+                <td>{{.Version}}</td>
+                <td>{{if .ReplicationLag}}{{.ReplicationLag}}{{else}}—{{end}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <table style="max-width:900px; margin-bottom:8px;">
+        <tbody>
+            <tr><td style="color:#555;width:240px;">Cluster Role</td><td><strong>{{$rc.ClusterRole}}</strong></td></tr>
+            <tr><td style="color:#555;">Global Status</td>
+                <td><strong style="{{if eq $rc.GlobalStatus "OK"}}color:green{{else}}color:#c00{{end}}">{{$rc.GlobalStatus}}</strong></td>
+            </tr>
+            <tr><td style="color:#555;">ClusterSet Replication Status</td><td><strong>{{$rc.Status}}</strong></td></tr>
+            {{if $rc.TransactionSet}}<tr><td style="color:#555;">Transaction Set (GTID)</td><td><code style="font-size:11px;">{{$rc.TransactionSet}}</code></td></tr>{{end}}
+            {{if $rc.TxConsistencyStatus}}<tr><td style="color:#555;">TX Consistency Status</td>
+                <td><strong style="{{if eq $rc.TxConsistencyStatus "OK"}}color:green{{else}}color:#c00{{end}}">{{$rc.TxConsistencyStatus}}</strong></td>
+            </tr>{{end}}
+            {{if $rc.TxErrantGTID}}<tr><td style="color:#555;">Errant GTID Set</td><td><code style="color:#c00;font-size:11px;">{{$rc.TxErrantGTID}}</code></td></tr>{{end}}
+            {{if $rc.TxMissingGTID}}<tr><td style="color:#555;">Missing GTID Set</td><td><code style="color:#c00;font-size:11px;">{{$rc.TxMissingGTID}}</code></td></tr>{{end}}
+        </tbody>
+    </table>
+    <!-- ClusterSet Replication Channel (DC → DR async link) -->
+    {{if $rc.CSReplSource}}
+    <h5 style="margin:6px 0 4px;color:#444;">ClusterSet Replication Channel (DC → DR)</h5>
+    <table style="max-width:900px; margin-bottom:18px;">
+        <thead>
+            <tr>
+                <th>Source</th>
+                <th>Receiver (DR)</th>
+                <th>Receiver Status</th>
+                <th>Receiver Thread State</th>
+                <th>Applier Status</th>
+                <th>Applier Threads</th>
+                <th>Applier Thread State</th>
+                <th>SSL Mode</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>{{$rc.CSReplSource}}</code></td>
+                <td><code>{{$rc.CSReplReceiver}}</code></td>
+                <td style="font-weight:bold; {{if eq $rc.CSReplReceiverStatus "ON"}}color:green{{else}}color:#c00{{end}}">{{$rc.CSReplReceiverStatus}}</td>
+                <td style="font-size:11px;">{{$rc.CSReplReceiverThreadState}}</td>
+                <td style="font-weight:bold; {{if eq $rc.CSReplApplierStatus "APPLIED_ALL"}}color:green{{else}}color:#c00{{end}}">{{$rc.CSReplApplierStatus}}</td>
+                <td style="text-align:center;">{{$rc.CSReplApplierThreads}}</td>
+                <td style="font-size:11px;">{{$rc.CSReplApplierThreadState}}</td>
+                <td>{{$rc.CSReplSSLMode}}</td>
+            </tr>
+        </tbody>
+    </table>
+    {{end}}
+    {{end}}
+
+    {{else if .ClusterSetStatus}}
+    <!-- Fallback: raw JSON from metadata tables -->
+    <p style="font-size:12px;color:#888;margin-bottom:4px;">ClusterSet status (raw from metadata):</p>
+    <pre style="font-size:11px;background:#fafeff;border:1px solid #6FAEBF;padding:10px;overflow-x:auto;max-height:400px;">{{.ClusterSetStatus}}</pre>
+    {{end}}
+
+    {{if .ClusterStatus}}
+    <h4>InnoDB Cluster Status (raw metadata)</h4>
+    <pre style="font-size:11px;background:#fafeff;border:1px solid #6FAEBF;padding:10px;overflow-x:auto;max-height:300px;">{{.ClusterStatus}}</pre>
+    {{end}}
+
+    <!-- Single InnoDB Cluster (no ClusterSet) -->
+    {{if .SingleClusterTopo}}
+    {{$sc := .SingleClusterTopo}}
+    <h4 style="color:#1a5276;">&#9654; InnoDB Cluster
+        <span style="font-weight:normal;font-size:12px;color:#555;"> — {{$sc.Status}}</span>
+    </h4>
+    <table style="max-width:700px; margin-bottom:10px;">
+        <thead><tr><th>Property</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>Global Primary</td><td><code>{{$sc.GlobalPrimaryInstance}}</code></td></tr>
+            <tr><td>Status</td><td><strong style="{{if eq $sc.Status "OK"}}color:green{{else}}color:#c00{{end}}">{{$sc.Status}}</strong></td></tr>
+        </tbody>
+    </table>
+    {{if $sc.PrimaryClusterData}}
+    <table style="max-width:1000px; margin-bottom:18px;">
+        <thead>
+            <tr>
+                <th>Node Address</th><th>Member Role</th><th>Mode</th>
+                <th>Status</th><th>Version</th><th>Replication Lag</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $sc.PrimaryClusterData.Nodes}}
+            <tr>
+                <td><code>{{.Address}}</code></td>
+                <td><strong>{{.MemberRole}}</strong></td>
+                <td>{{.Mode}}</td>
+                <td style="font-weight:bold; {{if eq .Status "ONLINE"}}color:green{{else}}color:#c00{{end}}">{{.Status}}</td>
+                <td>{{.Version}}</td>
+                <td>{{if .ReplicationLag}}{{.ReplicationLag}}{{else}}—{{end}}</td>
             </tr>
             {{end}}
         </tbody>
@@ -1973,8 +3466,73 @@ const htmlTemplate = `<!DOCTYPE html>
     {{end}}
     {{end}}
 
+    <!-- MySQL Router — single table, routing options merged as columns -->
+    {{if or .CSRouters .CSRoutingOptions}}
+    <h3>MySQL Router Instances</h3>
+    {{if .CSRouters}}
+    <table style="max-width:1400px; margin-bottom:10px;">
+        <thead>
+            <tr>
+                <th>Router Name</th>
+                <th>Hostname</th>
+                <th>Version</th>
+                <th>Last Check-In</th>
+                <th>RW Port</th>
+                <th>RO Port</th>
+                <th>RWX Port</th>
+                <th>ROX Port</th>
+                <th>RW Split</th>
+                <th>Target Cluster</th>
+                <th>Global target_cluster</th>
+                <th>On Invalidate</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .CSRouters}}
+            <tr>
+                <td><strong>{{.RouterKey}}</strong></td>
+                <td>{{.Hostname}}</td>
+                <td>{{.Version}}</td>
+                <td style="font-size:11px;">{{if .LastCheckIn}}{{.LastCheckIn}}{{else}}—{{end}}</td>
+                <td style="text-align:center;">{{if .RWPort}}{{.RWPort}}{{else}}—{{end}}</td>
+                <td style="text-align:center;">{{if .ROPort}}{{.ROPort}}{{else}}—{{end}}</td>
+                <td style="text-align:center;">{{if .RWXPort}}{{.RWXPort}}{{else}}—{{end}}</td>
+                <td style="text-align:center;">{{if .ROXPort}}{{.ROXPort}}{{else}}—{{end}}</td>
+                <td style="text-align:center;">{{if .RWSplitPort}}{{.RWSplitPort}}{{else}}—{{end}}</td>
+                <td><strong>{{if .TargetCluster}}{{.TargetCluster}}{{else}}—{{end}}</strong></td>
+                <td><strong>{{if $.CSRoutingOptions}}{{$.CSRoutingOptions.GlobalTargetCluster}}{{else}}—{{end}}</strong></td>
+                <td><strong>{{if $.CSRoutingOptions}}{{$.CSRoutingOptions.GlobalInvalidatedPolicy}}{{else}}—{{end}}</strong></td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else if .CSRoutingOptions}}
+    {{$ro := .CSRoutingOptions}}
+    <table style="max-width:600px; margin-bottom:10px;">
+        <thead><tr><th>Option</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>target_cluster</td><td><strong>{{$ro.GlobalTargetCluster}}</strong></td></tr>
+            <tr><td>invalidated_cluster_policy</td><td><strong>{{$ro.GlobalInvalidatedPolicy}}</strong></td></tr>
+            <tr><td>stats_updates_frequency</td><td>{{$ro.GlobalStatsFrequency}}</td></tr>
+            {{range $key, $val := $ro.RouterOverrides}}
+            <tr><td>{{$key}} target_cluster override</td><td><strong style="color:#c00;">{{$val}}</strong></td></tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{end}}
+    {{end}}
+
+    {{end}}{{/* end: if ClusterStatus/ClusterSetStatus/ClusterSetTopology/Routers */}}
+
     <!-- 6. Current Binary Log Status -->
-    <h2 id="replica-source">6. Current Binary Log Status</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('replica-source')">
+        <div class="sec-hdr-left"><span class="sec-num">6</span><h2 id="replica-source">6. Current Binary Log Status</h2></div>
+        <button class="sec-toggle" id="btn-replica-source">▲ Collapse</button>
+    </div>
+    <div class="sec-body" id="body-replica-source">
     <table style="max-width: 600px;">
         <thead>
             <tr>
@@ -1995,7 +3553,14 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     <!-- 7. Process List & Query History -->
-    <h2 id="process">7. Process List &amp; Query History</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('process')">
+        <div class="sec-hdr-left"><span class="sec-num">7</span><h2 id="process">7. Process List &amp; Query History</h2></div>
+        <button class="sec-toggle" id="btn-process">▲ Collapse</button>
+    </div>
+    <div class="sec-body" id="body-process">
     
     <h3>Active Connections Thread Status</h3>
     <table>
@@ -2216,7 +3781,14 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     <!-- 8. Major Performance Schema Insights -->
-    <h2 id="perf-schema">8. Performance Schema Insights</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('perf-schema')">
+        <div class="sec-hdr-left"><span class="sec-num">8</span><h2 id="perf-schema">8. Performance Schema Insights</h2></div>
+        <button class="sec-toggle" id="btn-perf-schema">▲ Collapse</button>
+    </div>
+    <div class="sec-body" id="body-perf-schema">
 
     <h3>Performance Schema Threads</h3>
     <table>
@@ -2331,7 +3903,14 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     <!-- 9. User Details -->
-    <h2 id="user-details">9. User Details</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('user-details')">
+        <div class="sec-hdr-left"><span class="sec-num">9</span><h2 id="user-details">9. User Details</h2></div>
+        <button class="sec-toggle" id="btn-user-details">▼ Expand</button>
+    </div>
+    <div class="sec-body collapsed" id="body-user-details">
     <table style="max-width: 750px;">
         <thead>
             <tr>
@@ -2362,7 +3941,14 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
 
     <!-- 10. Recommendations -->
-    <h2 id="recommendations">10. Optimization Recommendations</h2>
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('recommendations')">
+        <div class="sec-hdr-left"><span class="sec-num">10</span><h2 id="recommendations">10. Optimization Recommendations</h2></div>
+        <button class="sec-toggle" id="btn-recommendations">▲ Collapse</button>
+    </div>
+    <div class="sec-body" id="body-recommendations">
     <p>Automated database diagnostic evaluations assessed against current active metrics:</p>
     
     {{range .Recommendations}}
@@ -2374,8 +3960,12 @@ const htmlTemplate = `<!DOCTYPE html>
     <p>No operational mismatches or threshold flags detected on this collection run.</p>
     {{end}}
 
+    </div></div><!-- end sec-body/sec-card -->
+
+    </div><!-- end .content -->
+
     <footer>
-        <p>MySQL Gather Diagnostic Report | Inspired by the pg_gather philosophy for clean, rapid DB checks.</p>
+        mysql_gather &nbsp;·&nbsp; Database Health Report &nbsp;·&nbsp; Inspired by the pg_gather philosophy
     </footer>
 
     <script>
@@ -2402,5 +3992,25 @@ const htmlTemplate = `<!DOCTYPE html>
             }
         }
     </script>
+
+<script>
+function toggleSec(id) {
+    var body = document.getElementById('body-' + id);
+    var btn  = document.getElementById('btn-'  + id);
+    if (!body) return;
+    if (body.classList.contains('collapsed')) {
+        body.classList.remove('collapsed');
+        btn.textContent = '▲ Collapse';
+    } else {
+        body.classList.add('collapsed');
+        btn.textContent = '▼ Expand';
+    }
+}
+</script>
 </body>
 </html>`
+
+
+
+
+
