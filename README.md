@@ -41,3 +41,11 @@ chmod +x mysql_gather
 
 # Run the tool
 ./mysql_gather --user=root --password=Root@1234 --host=127.0.0.1 --port=3306
+
+### Screenshots
+
+<img width="3010" height="1636" alt="image" src="https://github.com/user-attachments/assets/69a1e627-91ba-4096-8669-a469e7cc845b" />
+<img width="3024" height="1484" alt="image" src="https://github.com/user-attachments/assets/fe4a99bd-3a72-4590-a383-e3f25453f461" />
+
+
+
