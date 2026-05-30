@@ -23,7 +23,6 @@ go mod tidy
 go build -o mysql_gather main.go
 chmod +x mysql_gather
 ./mysql_gather --user=<USER> --password=<PASSWORD> --host=<HOST> --port=<PORT>
-```
 
 
 To build this project from source, you need to have Go (Golang) installed on your machine.
@@ -34,15 +33,16 @@ To build this project from source, you need to have Go (Golang) installed on you
 
 Verify your installation by running `go version` in your terminal or command prompt.
 
-# Compile the code
+### Compile the code
 go build -o mysql_gather main.go
 
-# Make it executable (usually required on Linux/Mac)
+### Make it executable (usually required on Linux/Mac)
 chmod +x mysql_gather
 
-# Run the tool
+### Run the tool
 ./mysql_gather --user=root --password=Root@1234 --host=127.0.0.1 --port=3306
 
+```
 ---
 ## 📸 Screenshots
 
