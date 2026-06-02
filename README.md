@@ -30,6 +30,7 @@ To build this project from source, you need to have Go (Golang) installed on you
 
 - Mac (Homebrew): `brew install go`
 - Linux (Ubuntu/Debian): `sudo apt install golang-go`
+- Linux (Centos/Rhel): `sudo yum/dnf install go`
 - Windows: Download the installer from `https://go.dev/dl/`
 
 Verify your installation by running `go version` in your terminal or command prompt.
