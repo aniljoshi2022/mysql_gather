@@ -96,24 +96,24 @@ type GroupMember struct {
 
 // ReplicationStatus holds replica status info
 type ReplicationStatus struct {
-	ChannelName          string
-	ReplicaIORunning     string
-	ReplicaSQLRunning    string
-	SourceHost           string
-	SourceUser           string
-	SourcePort           string
-	MasterLogFile        string
-	ReadMasterLogPos     string
-	RelayLogFile         string
-	RelayLogPos          string
-	RelayMasterLogFile   string
-	ExecMasterLogPos     string
-	SecondsBehind        string
-	RetrievedGtidSet     string
-	ExecutedGtidSet      string
-	LastIOError          string
-	LastSQLError         string
-	AutoPosition         string
+	ChannelName        string
+	ReplicaIORunning   string
+	ReplicaSQLRunning  string
+	SourceHost         string
+	SourceUser         string
+	SourcePort         string
+	MasterLogFile      string
+	ReadMasterLogPos   string
+	RelayLogFile       string
+	RelayLogPos        string
+	RelayMasterLogFile string
+	ExecMasterLogPos   string
+	SecondsBehind      string
+	RetrievedGtidSet   string
+	ExecutedGtidSet    string
+	LastIOError        string
+	LastSQLError       string
+	AutoPosition       string
 }
 
 // ReplicaWorkerStatus holds per-worker applier error details
@@ -155,22 +155,22 @@ type WsrepProviderOption struct {
 // WsrepQueueMax holds wsrep_local_recv_queue and wsrep_local_recv_queue_max
 // from performance_schema.global_status, used for fc_limit comparison
 type WsrepQueueMax struct {
-	RecvQueue    string
-	RecvQueueMax string
-	FCLimit      string // extracted gcs.fc_limit from wsrep_provider_options
-	FCMasterSlave string // extracted gcs.fc_master_slave
+	RecvQueue       string
+	RecvQueueMax    string
+	FCLimit         string // extracted gcs.fc_limit from wsrep_provider_options
+	FCMasterSlave   string // extracted gcs.fc_master_slave
 	FCSinglePrimary string // extracted gcs.fc_single_primary
-	Alert        bool   // true when RecvQueueMax >= FCLimit
+	Alert           bool   // true when RecvQueueMax >= FCLimit
 }
 
 // GRFlowConfig holds the Group Replication flow control + consistency variables
 type GRFlowConfig struct {
-	CommStack         string
-	Consistency       string
-	ApplierThreshold  string
-	CertThreshold     string
-	FlowControlMode   string
-	BootstrapGroup    string
+	CommStack        string
+	Consistency      string
+	ApplierThreshold string
+	CertThreshold    string
+	FlowControlMode  string
+	BootstrapGroup   string
 }
 
 // GaleraSummary holds the key PXC cluster identity and status fields
@@ -225,20 +225,20 @@ type FileIOEvent struct {
 
 // DigestStat represents the detailed statement summary from performance_schema
 type DigestStat struct {
-	Digest                 string
-	SchemaName             string
-	QuerySample            string
-	ExecCount              string
-	TotalExecSec           string
-	AvgExecMs              string
-	TotalLockSec           string
-	RowsExamined           string
-	RowsSent               string
-	CreatedTmpTables       string
-	CreatedTmpDiskTables   string
-	SortRows               string
-	NoIndexUsed            string
-	NoGoodIndexUsed        string
+	Digest               string
+	SchemaName           string
+	QuerySample          string
+	ExecCount            string
+	TotalExecSec         string
+	AvgExecMs            string
+	TotalLockSec         string
+	RowsExamined         string
+	RowsSent             string
+	CreatedTmpTables     string
+	CreatedTmpDiskTables string
+	SortRows             string
+	NoIndexUsed          string
+	NoGoodIndexUsed      string
 }
 
 // LockWait represents information from sys.innodb_lock_waits
@@ -301,17 +301,17 @@ type InnodbTrx struct {
 
 // PfsThread holds background and foreground thread details from performance_schema.threads
 type PfsThread struct {
-	ThreadID    string
-	Name        string
-	Type        string
-	ProcesslistID   string
-	ProcesslistUser string
-	ProcesslistHost string
-	ProcesslistDB   string
+	ThreadID           string
+	Name               string
+	Type               string
+	ProcesslistID      string
+	ProcesslistUser    string
+	ProcesslistHost    string
+	ProcesslistDB      string
 	ProcesslistCommand string
-	ProcesslistTime string
-	ProcesslistState string
-	ProcesslistInfo string
+	ProcesslistTime    string
+	ProcesslistState   string
+	ProcesslistInfo    string
 }
 
 // UserDetail holds MySQL account details from mysql.user
@@ -343,16 +343,16 @@ type CSTopologyNode struct {
 
 // CSCluster represents one cluster inside the ClusterSet
 type CSCluster struct {
-	Name                      string
-	ClusterRole               string // PRIMARY / REPLICA
-	GlobalStatus              string
-	Status                    string
-	StatusText                string
-	Primary                   string // primary member address (primary cluster only)
-	TransactionSet            string
-	TxConsistencyStatus       string
-	TxErrantGTID              string
-	TxMissingGTID             string
+	Name                string
+	ClusterRole         string // PRIMARY / REPLICA
+	GlobalStatus        string
+	Status              string
+	StatusText          string
+	Primary             string // primary member address (primary cluster only)
+	TransactionSet      string
+	TxConsistencyStatus string
+	TxErrantGTID        string
+	TxMissingGTID       string
 	// ClusterSet replication channel (replica clusters only)
 	CSReplSource              string
 	CSReplReceiver            string
@@ -425,14 +425,16 @@ type csRawRoutingRouter struct {
 	TargetCluster string `json:"target_cluster"`
 }
 type csRawRoutingOptions struct {
-	DomainName string                            `json:"domainName"`
-	Global     csRawRoutingGlobal                `json:"global"`
-	Routers    map[string]csRawRoutingRouter     `json:"routers"`
+	DomainName string                        `json:"domainName"`
+	Global     csRawRoutingGlobal            `json:"global"`
+	Routers    map[string]csRawRoutingRouter `json:"routers"`
 }
 
 func parseRouterList(raw []byte) ([]CSRouter, error) {
 	var rl csRawRouterList
-	if err := json.Unmarshal(raw, &rl); err != nil { return nil, err }
+	if err := json.Unmarshal(raw, &rl); err != nil {
+		return nil, err
+	}
 	var out []CSRouter
 	for key, r := range rl.Routers {
 		out = append(out, CSRouter{RouterKey: key, Hostname: r.Hostname,
@@ -444,15 +446,19 @@ func parseRouterList(raw []byte) ([]CSRouter, error) {
 
 func parseRoutingOptions(raw []byte) (*CSRoutingOptions, error) {
 	var ro csRawRoutingOptions
-	if err := json.Unmarshal(raw, &ro); err != nil { return nil, err }
+	if err := json.Unmarshal(raw, &ro); err != nil {
+		return nil, err
+	}
 	overrides := map[string]string{}
 	for k, v := range ro.Routers {
-		if v.TargetCluster != "" { overrides[k] = v.TargetCluster }
+		if v.TargetCluster != "" {
+			overrides[k] = v.TargetCluster
+		}
 	}
 	return &CSRoutingOptions{
 		DomainName: ro.DomainName, GlobalInvalidatedPolicy: ro.Global.InvalidatedClusterPolicy,
 		GlobalStatsFrequency: fmt.Sprintf("%d", ro.Global.StatsUpdatesFrequency),
-		GlobalTargetCluster: ro.Global.TargetCluster, RouterOverrides: overrides,
+		GlobalTargetCluster:  ro.Global.TargetCluster, RouterOverrides: overrides,
 	}, nil
 }
 
@@ -472,12 +478,15 @@ func prettyJSONRaw(raw json.RawMessage) string {
 func csRunMysqlsh(bin, uri, password, jsCode string) ([]byte, error) {
 	cmd := exec.Command(bin, "--uri="+uri, "--password="+password, "--js", "--no-wizard", "-e", jsCode)
 	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out; cmd.Stderr = &errBuf
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%v — %s", err, strings.TrimSpace(errBuf.String()))
 	}
 	raw := bytes.TrimSpace(out.Bytes())
-	if idx := bytes.IndexByte(raw, '{'); idx >= 0 { raw = raw[idx:] }
+	if idx := bytes.IndexByte(raw, '{'); idx >= 0 {
+		raw = raw[idx:]
+	}
 	return raw, nil
 }
 
@@ -492,38 +501,38 @@ type csRawNode struct {
 }
 
 type csRawReplication struct {
-	ApplierStatus       string `json:"applierStatus"`
-	ApplierThreadState  string `json:"applierThreadState"`
-	ApplierWorkerThreads int   `json:"applierWorkerThreads"`
-	Receiver            string `json:"receiver"`
-	ReceiverStatus      string `json:"receiverStatus"`
-	ReceiverThreadState string `json:"receiverThreadState"`
-	ReplicationSslMode  string `json:"replicationSslMode"`
-	Source              string `json:"source"`
+	ApplierStatus        string `json:"applierStatus"`
+	ApplierThreadState   string `json:"applierThreadState"`
+	ApplierWorkerThreads int    `json:"applierWorkerThreads"`
+	Receiver             string `json:"receiver"`
+	ReceiverStatus       string `json:"receiverStatus"`
+	ReceiverThreadState  string `json:"receiverThreadState"`
+	ReplicationSslMode   string `json:"replicationSslMode"`
+	Source               string `json:"source"`
 }
 
 type csRawCluster struct {
-	ClusterRole               string                       `json:"clusterRole"`
-	GlobalStatus              string                       `json:"globalStatus"`
-	Status                    string                       `json:"status"`
-	StatusText                string                       `json:"statusText"`
-	Primary                   string                       `json:"primary"`
-	TransactionSet            string                       `json:"transactionSet"`
-	TxConsistencyStatus       string                       `json:"transactionSetConsistencyStatus"`
-	TxErrantGTID              string                       `json:"transactionSetErrantGtidSet"`
-	TxMissingGTID             string                       `json:"transactionSetMissingGtidSet"`
-	ClusterSetReplication     *csRawReplication            `json:"clusterSetReplication"`
-	Topology                  map[string]csRawNode         `json:"topology"`
+	ClusterRole           string               `json:"clusterRole"`
+	GlobalStatus          string               `json:"globalStatus"`
+	Status                string               `json:"status"`
+	StatusText            string               `json:"statusText"`
+	Primary               string               `json:"primary"`
+	TransactionSet        string               `json:"transactionSet"`
+	TxConsistencyStatus   string               `json:"transactionSetConsistencyStatus"`
+	TxErrantGTID          string               `json:"transactionSetErrantGtidSet"`
+	TxMissingGTID         string               `json:"transactionSetMissingGtidSet"`
+	ClusterSetReplication *csRawReplication    `json:"clusterSetReplication"`
+	Topology              map[string]csRawNode `json:"topology"`
 }
 
 type csRawRoot struct {
-	DomainName            string                      `json:"domainName"`
-	GlobalPrimaryInstance string                      `json:"globalPrimaryInstance"`
-	PrimaryCluster        string                      `json:"primaryCluster"`
-	Status                string                      `json:"status"`
-	StatusText            string                      `json:"statusText"`
-	MetadataServer        string                      `json:"metadataServer"`
-	Clusters              map[string]csRawCluster     `json:"clusters"`
+	DomainName            string                  `json:"domainName"`
+	GlobalPrimaryInstance string                  `json:"globalPrimaryInstance"`
+	PrimaryCluster        string                  `json:"primaryCluster"`
+	Status                string                  `json:"status"`
+	StatusText            string                  `json:"statusText"`
+	MetadataServer        string                  `json:"metadataServer"`
+	Clusters              map[string]csRawCluster `json:"clusters"`
 }
 
 // parseClusterSetJSON converts the raw mysqlsh JSON into ClusterSetTopology
@@ -555,14 +564,14 @@ func parseClusterSetJSON(raw []byte) (*ClusterSetTopology, error) {
 		}
 		if rc.ClusterSetReplication != nil {
 			r := rc.ClusterSetReplication
-			cl.CSReplSource         = r.Source
-			cl.CSReplReceiver       = r.Receiver
+			cl.CSReplSource = r.Source
+			cl.CSReplReceiver = r.Receiver
 			cl.CSReplReceiverStatus = r.ReceiverStatus
-			cl.CSReplApplierStatus  = r.ApplierStatus
+			cl.CSReplApplierStatus = r.ApplierStatus
 			cl.CSReplApplierThreads = r.ApplierWorkerThreads
 			cl.CSReplReceiverThreadState = r.ReceiverThreadState
-			cl.CSReplApplierThreadState  = r.ApplierThreadState
-			cl.CSReplSSLMode        = r.ReplicationSslMode
+			cl.CSReplApplierThreadState = r.ApplierThreadState
+			cl.CSReplSSLMode = r.ReplicationSslMode
 		}
 		for _, node := range rc.Topology {
 			cl.Nodes = append(cl.Nodes, CSTopologyNode{
@@ -805,9 +814,13 @@ func collectInnoDBTopologySQL(db *sql.DB) (csTop *ClusterSetTopology, singleTop 
 				var addr, uuid, classicAddr, role, state, version string
 				iRows.Scan(&addr, &uuid, &classicAddr, &role, &state, &version)
 				displayAddr := addr
-				if displayAddr == "" { displayAddr = classicAddr }
+				if displayAddr == "" {
+					displayAddr = classicAddr
+				}
 				mode := "R/O"
-				if role == "PRIMARY" { mode = "R/W" }
+				if role == "PRIMARY" {
+					mode = "R/W"
+				}
 				cl.Nodes = append(cl.Nodes, CSTopologyNode{
 					Address: displayAddr, MemberRole: role,
 					Mode: mode, Status: state, Version: version,
@@ -840,10 +853,10 @@ func collectInnoDBTopologySQL(db *sql.DB) (csTop *ClusterSetTopology, singleTop 
 				  ON ios.CHANNEL_NAME = csa.CHANNEL_NAME
 				WHERE ios.CHANNEL_NAME LIKE '%clusterset%'
 				LIMIT 1`).Scan(&src, &rcvr, &rcvrState, &applState, &workers)
-			cl.CSReplSource         = src
-			cl.CSReplReceiver       = rcvr
+			cl.CSReplSource = src
+			cl.CSReplReceiver = rcvr
 			cl.CSReplReceiverStatus = rcvrState
-			cl.CSReplApplierStatus  = applState
+			cl.CSReplApplierStatus = applState
 			cl.CSReplApplierThreads = workers
 
 			// GTID info
@@ -857,7 +870,7 @@ func collectInnoDBTopologySQL(db *sql.DB) (csTop *ClusterSetTopology, singleTop 
 				FROM performance_schema.replication_connection_status
 				WHERE CHANNEL_NAME LIKE '%clusterset%'
 				LIMIT 1`).Scan(&txSet, &txConsistency, &txErrant, &txMissing)
-			cl.TransactionSet      = txSet
+			cl.TransactionSet = txSet
 			cl.TxConsistencyStatus = txConsistency
 		} else {
 			// Primary: get executed GTID set
@@ -870,7 +883,11 @@ func collectInnoDBTopologySQL(db *sql.DB) (csTop *ClusterSetTopology, singleTop 
 		var onlineCount int
 		db.QueryRow(`SELECT COUNT(*) FROM performance_schema.replication_group_members
 			WHERE MEMBER_STATE = 'ONLINE'`).Scan(&onlineCount)
-		if onlineCount > 0 { cl.GlobalStatus = "OK" } else { cl.GlobalStatus = "ERROR" }
+		if onlineCount > 0 {
+			cl.GlobalStatus = "OK"
+		} else {
+			cl.GlobalStatus = "ERROR"
+		}
 
 		return cl
 	}
@@ -1036,11 +1053,11 @@ func queryRouterMetadata(db *sql.DB) []RouterDetails {
 
 func main() {
 	// 1. Command Line Flags for Connection Parameters (Zero Hardcoding)
-	user     := flag.String("user", "root", "MySQL database user")
+	user := flag.String("user", "root", "MySQL database user")
 	password := flag.String("password", "", "MySQL database password")
-	host     := flag.String("host", "127.0.0.1", "MySQL host address")
-	port     := flag.Int("port", 3306, "MySQL host port")
-	output   := flag.String("output", "mysql_gather.html", "Path to write the standalone HTML report")
+	host := flag.String("host", "127.0.0.1", "MySQL host address")
+	port := flag.Int("port", 3306, "MySQL host port")
+	output := flag.String("output", "mysql_gather.html", "Path to write the standalone HTML report")
 	flag.Parse()
 
 	log.Printf("Starting MySQL Gatherer. Connecting to %s:%d...", *host, *port)
@@ -1075,7 +1092,7 @@ func main() {
 	_ = db.QueryRow("SELECT @@hostname;").Scan(&data.Summary.Hostname)
 	_ = db.QueryRow("SELECT VERSION();").Scan(&data.Summary.ServerVersion)
 	_ = db.QueryRow("SELECT @@transaction_isolation;").Scan(&data.Summary.TxnIsolation)
-	
+
 	var ro int
 	if err := db.QueryRow("SELECT @@global.read_only;").Scan(&ro); err == nil {
 		if ro == 1 {
@@ -1101,7 +1118,7 @@ func main() {
 	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Opened_tables';").Scan(&data.Summary.Opens)
 	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Flush_commands';").Scan(&data.Summary.FlushTables)
 	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Open_tables';").Scan(&data.Summary.OpenTables)
-	
+
 	if uptimeSeconds > 0 && data.Summary.Questions != "" {
 		qCount, _ := strconv.ParseFloat(data.Summary.Questions, 64)
 		data.Summary.QueriesPerSec = fmt.Sprintf("%.3f", qCount/float64(uptimeSeconds))
@@ -1405,7 +1422,7 @@ func main() {
 			IFNULL(MAX(CASE WHEN VARIABLE_NAME='wsrep_flow_control_paused' THEN VARIABLE_VALUE END), '0.000000') AS flow_control_paused
 		FROM performance_schema.global_status
 		WHERE VARIABLE_NAME IN ('wsrep_local_recv_queue', 'wsrep_local_send_queue', 'wsrep_flow_control_paused');`
-	
+
 	var gqs GaleraQueueStats
 	var recvQ, sendQ, fcPaused sql.NullString
 	if err := db.QueryRow(galeraStatsQuery).Scan(&recvQ, &sendQ, &fcPaused); err == nil {
@@ -1639,9 +1656,9 @@ print(JSON.stringify(out));
 			data.ClusterSetTopology, data.SingleClusterTopo = collectInnoDBTopologySQL(db)
 			// #region agent log
 			debugLog("E", "main.go:mysqlsh-fallback", "SQL fallback after mysqlsh failure", map[string]interface{}{
-				"execErr":              execErr.Error(),
+				"execErr":               execErr.Error(),
 				"gotClusterSetTopology": data.ClusterSetTopology != nil,
-				"gotSingleClusterTopo": data.SingleClusterTopo != nil,
+				"gotSingleClusterTopo":  data.SingleClusterTopo != nil,
 			})
 			// #endregion
 			data.CSRoutingOptions = collectRoutingOptionsSQL(db)
@@ -1746,7 +1763,9 @@ print(JSON.stringify(out));
 					break
 				}
 			}
-			if hasBetter { continue }
+			if hasBetter {
+				continue
+			}
 		}
 		if !seen[key] {
 			seen[key] = true
@@ -1772,21 +1791,21 @@ print(JSON.stringify(out));
 		csTopoNodes = len(data.ClusterSetTopology.PrimaryClusterData.Nodes)
 	}
 	debugLog("A", "main.go:innoDB-gate", "InnoDB Cluster HTML outer gate evaluation", map[string]interface{}{
-		"outerGateWouldOpen":   innoDBOuterGate,
-		"hasClusterStatus":     data.ClusterStatus != "",
-		"hasClusterSetStatus":  data.ClusterSetStatus != "",
+		"outerGateWouldOpen":    innoDBOuterGate,
+		"hasClusterStatus":      data.ClusterStatus != "",
+		"hasClusterSetStatus":   data.ClusterSetStatus != "",
 		"hasClusterSetTopology": data.ClusterSetTopology != nil,
-		"hasSingleClusterTopo": data.SingleClusterTopo != nil,
-		"singleTopoNodes":      singleTopoNodes,
-		"csTopoNodes":          csTopoNodes,
-		"routersLen":           len(data.Routers),
-		"hiddenSingleTopoBug":  data.SingleClusterTopo != nil && !innoDBOuterGate,
+		"hasSingleClusterTopo":  data.SingleClusterTopo != nil,
+		"singleTopoNodes":       singleTopoNodes,
+		"csTopoNodes":           csTopoNodes,
+		"routersLen":            len(data.Routers),
+		"hiddenSingleTopoBug":   data.SingleClusterTopo != nil && !innoDBOuterGate,
 	})
 	debugLog("B", "main.go:router-gate", "MySQL Router HTML gate evaluation", map[string]interface{}{
-		"csRoutersCount":       len(data.CSRouters),
-		"hasCSRoutingOptions":  data.CSRoutingOptions != nil,
-		"routerInnerGateOpen":  len(data.CSRouters) > 0 || data.CSRoutingOptions != nil,
-		"hiddenRouterBug":      (len(data.CSRouters) > 0 || data.CSRoutingOptions != nil) && !innoDBOuterGate,
+		"csRoutersCount":      len(data.CSRouters),
+		"hasCSRoutingOptions": data.CSRoutingOptions != nil,
+		"routerInnerGateOpen": len(data.CSRouters) > 0 || data.CSRoutingOptions != nil,
+		"hiddenRouterBug":     (len(data.CSRouters) > 0 || data.CSRoutingOptions != nil) && !innoDBOuterGate,
 	})
 	// #endregion
 
@@ -1861,7 +1880,7 @@ print(JSON.stringify(out));
 		FROM performance_schema.events_statements_summary_by_digest
 		ORDER BY SUM_TIMER_WAIT DESC
 		LIMIT 10;`
-	
+
 	if rows, err := db.Query(historyQuery); err == nil {
 		for rows.Next() {
 			var d DigestStat
@@ -1956,7 +1975,7 @@ print(JSON.stringify(out));
 			LEFT JOIN performance_schema.events_statements_history AS esh 
 				ON stlw.blocking_thread_id = esh.THREAD_ID 
 			GROUP BY stlw.blocking_pid, stlw.object_schema, stlw.object_name, stlw.blocking_thread_id;`
-		
+
 		if rows, err := db.Query(ddlQuery); err == nil {
 			for rows.Next() {
 				var d DDLLock
@@ -2119,8 +2138,8 @@ print(JSON.stringify(out));
 			missRate := (float64(tCreated) / float64(conns)) * 100.0
 			if missRate > 10.0 {
 				data.Recommendations = append(data.Recommendations, Recommendation{
-					Type:      "WARNING",
-					Parameter: "thread_cache_size (Current: " + threadCacheSizeStr + ")",
+					Type:        "WARNING",
+					Parameter:   "thread_cache_size (Current: " + threadCacheSizeStr + ")",
 					Description: fmt.Sprintf("High Thread Cache Miss Rate detected (%.2f%%). Spawning raw OS threads under high connection activity causes excessive CPU context-switching. Increase your thread_cache_size parameter progressively (e.g. to 32, 64, or 128) to cache connection streams.", missRate),
 				})
 			}
@@ -2137,8 +2156,8 @@ print(JSON.stringify(out));
 			diskRatio := (float64(tDiskTables) / float64(tTables)) * 100.0
 			if diskRatio > 25.0 {
 				data.Recommendations = append(data.Recommendations, Recommendation{
-					Type:      "WARNING",
-					Parameter: "tmp_table_size & max_heap_table_size",
+					Type:        "WARNING",
+					Parameter:   "tmp_table_size & max_heap_table_size",
 					Description: fmt.Sprintf("High Disk Temporary Table Ratio (%.2f%% of %d total temp tables). Over 25%% of internal GROUP BY or DISTINCT queries are spilling from memory to disk. Increase both tmp_table_size and max_heap_table_size variables in tandem to 32M or 64M to avoid slow disk I/O.", diskRatio, tTables),
 				})
 			}
@@ -2152,8 +2171,8 @@ print(JSON.stringify(out));
 		mergeRate := float64(merges) / float64(uptimeSeconds)
 		if mergeRate > 1.0 {
 			data.Recommendations = append(data.Recommendations, Recommendation{
-				Type:      "WARNING",
-				Parameter: "sort_buffer_size",
+				Type:        "WARNING",
+				Parameter:   "sort_buffer_size",
 				Description: fmt.Sprintf("Active sort merge pass rate is steadily rising (%.3f merges/sec). Large queries are currently splitting filesort passes into temporary files on disk. Increase sort_buffer_size moderately to 1M or 2M to optimize.", mergeRate),
 			})
 		}
@@ -2169,8 +2188,8 @@ print(JSON.stringify(out));
 			hitRatio := (1.0 - (reads / requests)) * 100.0
 			if hitRatio < 98.0 {
 				data.Recommendations = append(data.Recommendations, Recommendation{
-					Type:      "CRITICAL",
-					Parameter: "innodb_buffer_pool_size",
+					Type:        "CRITICAL",
+					Parameter:   "innodb_buffer_pool_size",
 					Description: fmt.Sprintf("Low InnoDB Buffer Pool Cache Hit Ratio (%.2f%%). The cache cannot contain your active dataset and is bypassing memory to pull blocks from disk. Allocate additional RAM to innodb_buffer_pool_size (target 70-80%% of dedicated system memory).", hitRatio),
 				})
 			}
@@ -2194,8 +2213,8 @@ print(JSON.stringify(out));
 
 		if hourlyRedoBytes > totalCapacity {
 			data.Recommendations = append(data.Recommendations, Recommendation{
-				Type:      "WARNING",
-				Parameter: "innodb_log_file_size",
+				Type:        "WARNING",
+				Parameter:   "innodb_log_file_size",
 				Description: fmt.Sprintf("Estimated Hourly Write Redo volume is %s, exceeding your total log file capacity of %s. Logs are rotating too frequently, forcing heavy flush checkpoints. Increase innodb_log_file_size.", formatBytes(strconv.FormatFloat(hourlyRedoBytes, 'f', 0, 64)), formatBytes(strconv.FormatFloat(totalCapacity, 'f', 0, 64))),
 			})
 		}
@@ -2213,8 +2232,8 @@ print(JSON.stringify(out));
 		missRate := opened / float64(uptimeSeconds)
 		if missRate > 1.0 && openCur >= cacheCap {
 			data.Recommendations = append(data.Recommendations, Recommendation{
-				Type:      "WARNING",
-				Parameter: "table_open_cache (Current Limit: " + openCacheStr + ")",
+				Type:        "WARNING",
+				Parameter:   "table_open_cache (Current Limit: " + openCacheStr + ")",
 				Description: fmt.Sprintf("High open table cache miss rate (%.2f tables opened/sec) with saturated descriptors file pool (%d open / %d cache capacity). Descriptors are constantly being evicted. Increase table_open_cache.", missRate, openCur, cacheCap),
 			})
 		}
@@ -2230,8 +2249,8 @@ print(JSON.stringify(out));
 			saturation := (float64(maxUsed) / float64(maxAllowed)) * 100.0
 			if saturation > 85.0 {
 				data.Recommendations = append(data.Recommendations, Recommendation{
-					Type:      "CRITICAL",
-					Parameter: "max_connections",
+					Type:        "CRITICAL",
+					Parameter:   "max_connections",
 					Description: fmt.Sprintf("High Connection Pool Saturation (%.2f%% utilized). Peak concurrent user threads reached %d of %d maximum connections. Increase max_connections to avoid immediate connection timeout failures.", saturation, maxUsed, maxAllowed),
 				})
 			}
@@ -2251,15 +2270,15 @@ print(JSON.stringify(out));
 
 		if q.CertQueue > certThreshold {
 			data.Recommendations = append(data.Recommendations, Recommendation{
-				Type:      "CRITICAL",
-				Parameter: "Group Replication Flow Control (Certifier Queue)",
+				Type:        "CRITICAL",
+				Parameter:   "Group Replication Flow Control (Certifier Queue)",
 				Description: fmt.Sprintf("Certifier transaction queue size (%d) exceeds flow control threshold limit (%d) on node %s. Flow control triggers are active, throttling primary write rates.", q.CertQueue, certThreshold, q.MemberID),
 			})
 		}
 		if q.ApplierQueue > applierThreshold {
 			data.Recommendations = append(data.Recommendations, Recommendation{
-				Type:      "CRITICAL",
-				Parameter: "Group Replication Flow Control (Applier Queue)",
+				Type:        "CRITICAL",
+				Parameter:   "Group Replication Flow Control (Applier Queue)",
 				Description: fmt.Sprintf("Applier queue size (%d) exceeds flow control threshold limit (%d) on node %s. Flow control triggers are active, throttling primary write rates.", q.ApplierQueue, applierThreshold, q.MemberID),
 			})
 		}
@@ -2270,8 +2289,8 @@ print(JSON.stringify(out));
 		fcStatus, _ := strconv.ParseFloat(data.GaleraFlowControl, 64)
 		if fcStatus > 0.1 {
 			data.Recommendations = append(data.Recommendations, Recommendation{
-				Type:      "WARNING",
-				Parameter: "wsrep_flow_control_status",
+				Type:        "WARNING",
+				Parameter:   "wsrep_flow_control_status",
 				Description: fmt.Sprintf("PXC/Galera Cluster Flow Control is active (%.2f%% of time spent paused). Secondary nodes are falling behind, causing replication write stalls.", fcStatus*100.0),
 			})
 		}
@@ -2340,7 +2359,7 @@ print(JSON.stringify(out));
 		}
 
 		applierT, _ := strconv.Atoi(strings.TrimSpace(data.GRFlowConfig.ApplierThreshold))
-		certT, _    := strconv.Atoi(strings.TrimSpace(data.GRFlowConfig.CertThreshold))
+		certT, _ := strconv.Atoi(strings.TrimSpace(data.GRFlowConfig.CertThreshold))
 		if applierT > 0 && certT > 0 {
 			if applierT > 100000 || certT > 100000 {
 				data.Recommendations = append(data.Recommendations, Recommendation{
@@ -2362,11 +2381,28 @@ print(JSON.stringify(out));
 			hll := getRawInt(m.Value)
 			if hll > 200000 {
 				data.Recommendations = append(data.Recommendations, Recommendation{
-					Type:      "CRITICAL",
-					Parameter: "trx_rseg_history_len",
+					Type:        "CRITICAL",
+					Parameter:   "trx_rseg_history_len",
 					Description: fmt.Sprintf("History list length is extremely high (%d blocks). Your InnoDB transaction purge workers cannot clean old undo logs. Investigate and terminate long-running active transactions.", hll),
 				})
 			}
+		}
+	}
+
+	// Rule 12: wait_timeout at default value
+	waitTimeoutStr := variablesMap["wait_timeout"]
+	if waitTimeoutStr != "" {
+		waitTimeout := getRawInt(waitTimeoutStr)
+		if waitTimeout == 28800 {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "wait_timeout (Current: " + waitTimeoutStr + " seconds)",
+				Description: fmt.Sprintf("wait_timeout is set to %d seconds (%.1f hours), which is the MySQL default. "+
+					"This means idle client connections are kept open for up to 8 hours before the server closes them. "+
+					"In busy OLTP envivronment it can lead to resource exhaustion and eventually reaching maximum connection limit. "+
+					"Consider lowering it to 60–120 seconds if your application allow to release idle connections faster and reduce resource pressure.",
+					waitTimeout, float64(waitTimeout)/3600.0),
+			})
 		}
 	}
 
@@ -2556,19 +2592,16 @@ const htmlTemplate = `<!DOCTYPE html>
             padding: 0;
         }
         .sec-toggle {
-            font-size: 10px;
-            font-weight: 600;
-            color: #4a5568;
-            background: #edf2f7;
-            border: 1px solid #cbd5e0;
-            border-radius: 4px;
-            padding: 3px 10px;
+            font-size: 18px;
+            color: #718096;
+            background: none;
+            border: none;
             cursor: pointer;
-            white-space: nowrap;
-            font-family: inherit;
-            transition: background .15s;
+            padding: 0 4px;
+            line-height: 1;
+            transition: color .15s;
         }
-        .sec-toggle:hover { background: #e2e8f0; color: #2b6cb0; }
+        .sec-toggle:hover { color: #2b6cb0; }
         .sec-body { padding: 16px; }
         .sec-body.collapsed { display: none; }
 
@@ -2708,16 +2741,16 @@ const htmlTemplate = `<!DOCTYPE html>
 
     <!-- ── Section Nav ── -->
     <div class="sec-nav">
-        <a href="#summary">① System Summary</a><span class="sec-nav-sep">·</span>
-        <a href="#config">② Config Variables</a><span class="sec-nav-sep">·</span>
-        <a href="#status">③ Performance Metrics</a><span class="sec-nav-sep">·</span>
-        <a href="#innodb">④ InnoDB Status</a><span class="sec-nav-sep">·</span>
-        <a href="#replication">⑤ HA &amp; Replication</a><span class="sec-nav-sep">·</span>
-        <a href="#replica-source">⑥ Binary Log</a><span class="sec-nav-sep">·</span>
-        <a href="#process">⑦ Process List</a><span class="sec-nav-sep">·</span>
-        <a href="#perf-schema">⑧ Perf Schema</a><span class="sec-nav-sep">·</span>
-        <a href="#user-details">⑨ User Details</a><span class="sec-nav-sep">·</span>
-        <a href="#recommendations">⑩ Recommendations</a>
+        <a href="#summary">System Summary</a><span class="sec-nav-sep">·</span>
+        <a href="#config">Configuration Variables</a><span class="sec-nav-sep">·</span>
+        <a href="#status">Status Variables</a><span class="sec-nav-sep">·</span>
+        <a href="#innodb">InnoDB Monitor Stats</a><span class="sec-nav-sep">·</span>
+        <a href="#replication">HA &amp; Replication</a><span class="sec-nav-sep">·</span>
+        <a href="#replica-source">Binary Log Status</a><span class="sec-nav-sep">·</span>
+        <a href="#process">Process List &amp; Query Locks </a><span class="sec-nav-sep">·</span>
+        <a href="#perf-schema">Performance Schema Insight</a><span class="sec-nav-sep">·</span>
+        <a href="#user-details">User Details</a><span class="sec-nav-sep">·</span>
+        <a href="#recommendations">Recommendations</a>
     </div>
 
     <div class="content">
@@ -2727,7 +2760,7 @@ const htmlTemplate = `<!DOCTYPE html>
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('summary')">
         <div class="sec-hdr-left"><span class="sec-num">1</span><h2 id="summary">System Summary</h2></div>
-        <button class="sec-toggle" id="btn-summary">▲ Collapse</button>
+        <button class="sec-toggle" id="btn-summary">▲</button>
     </div>
     <div class="sec-body" id="body-summary">
     <table style="max-width: 800px; margin-bottom: 15px;">
@@ -2814,8 +2847,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('config')">
-        <div class="sec-hdr-left"><span class="sec-num">2</span><h2 id="config">2. Critical Configurations (SHOW GLOBAL VARIABLES)</h2></div>
-        <button class="sec-toggle" id="btn-config">▼ Expand</button>
+        <div class="sec-hdr-left"><span class="sec-num">2</span><h2 id="config">Configuration Variables</h2></div>
+        <button class="sec-toggle" id="btn-config">▼</button>
     </div>
     <div class="sec-body collapsed" id="body-config">
     <p>Filter global configuration variables dynamically:</p>
@@ -2844,8 +2877,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('status')">
-        <div class="sec-hdr-left"><span class="sec-num">3</span><h2 id="status">3. Performance Metrics (SHOW GLOBAL STATUS)</h2></div>
-        <button class="sec-toggle" id="btn-status">▼ Expand</button>
+        <div class="sec-hdr-left"><span class="sec-num">3</span><h2 id="status">Status Variables</h2></div>
+        <button class="sec-toggle" id="btn-status">▼</button>
     </div>
     <div class="sec-body collapsed" id="body-status">
     <p>Filter global status parameters dynamically:</p>
@@ -2874,8 +2907,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('innodb')">
-        <div class="sec-hdr-left"><span class="sec-num">4</span><h2 id="innodb">4. Storage Engine State (SHOW ENGINE INNODB STATUS)</h2></div>
-        <button class="sec-toggle" id="btn-innodb">▲ Collapse</button>
+        <div class="sec-hdr-left"><span class="sec-num">4</span><h2 id="innodb">Innodb Monitor Stats</h2></div>
+        <button class="sec-toggle" id="btn-innodb">▲</button>
     </div>
     <div class="sec-body" id="body-innodb">
     <pre>{{.InnodbStatus}}</pre>
@@ -2885,8 +2918,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('replication')">
-        <div class="sec-hdr-left"><span class="sec-num">5</span><h2 id="replication">5. HA &amp; Replication Topology</h2></div>
-        <button class="sec-toggle" id="btn-replication">▲ Collapse</button>
+        <div class="sec-hdr-left"><span class="sec-num">5</span><h2 id="replication">HA &amp; Replication Topology</h2></div>
+        <button class="sec-toggle" id="btn-replication">▲</button>
     </div>
     <div class="sec-body" id="body-replication">
     
@@ -3529,8 +3562,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('replica-source')">
-        <div class="sec-hdr-left"><span class="sec-num">6</span><h2 id="replica-source">6. Current Binary Log Status</h2></div>
-        <button class="sec-toggle" id="btn-replica-source">▲ Collapse</button>
+        <div class="sec-hdr-left"><span class="sec-num">6</span><h2 id="replica-source">Binary Log Status</h2></div>
+        <button class="sec-toggle" id="btn-replica-source">▲</button>
     </div>
     <div class="sec-body" id="body-replica-source">
     <table style="max-width: 600px;">
@@ -3557,8 +3590,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('process')">
-        <div class="sec-hdr-left"><span class="sec-num">7</span><h2 id="process">7. Process List &amp; Query History</h2></div>
-        <button class="sec-toggle" id="btn-process">▲ Collapse</button>
+        <div class="sec-hdr-left"><span class="sec-num">7</span><h2 id="process">Process List &amp; Query Locks</h2></div>
+        <button class="sec-toggle" id="btn-process">▲</button>
     </div>
     <div class="sec-body" id="body-process">
     
@@ -3785,12 +3818,12 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('perf-schema')">
-        <div class="sec-hdr-left"><span class="sec-num">8</span><h2 id="perf-schema">8. Performance Schema Insights</h2></div>
-        <button class="sec-toggle" id="btn-perf-schema">▲ Collapse</button>
+        <div class="sec-hdr-left"><span class="sec-num">8</span><h2 id="perf-schema">Performance Schema Insight</h2></div>
+        <button class="sec-toggle" id="btn-perf-schema">▲</button>
     </div>
     <div class="sec-body" id="body-perf-schema">
 
-    <h3>Performance Schema Threads</h3>
+    <h3>Threads Running Status</h3>
     <table>
         <thead>
             <tr>
@@ -3907,8 +3940,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('user-details')">
-        <div class="sec-hdr-left"><span class="sec-num">9</span><h2 id="user-details">9. User Details</h2></div>
-        <button class="sec-toggle" id="btn-user-details">▼ Expand</button>
+        <div class="sec-hdr-left"><span class="sec-num">9</span><h2 id="user-details">User Details</h2></div>
+        <button class="sec-toggle" id="btn-user-details">▼</button>
     </div>
     <div class="sec-body collapsed" id="body-user-details">
     <table style="max-width: 750px;">
@@ -3945,8 +3978,8 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('recommendations')">
-        <div class="sec-hdr-left"><span class="sec-num">10</span><h2 id="recommendations">10. Optimization Recommendations</h2></div>
-        <button class="sec-toggle" id="btn-recommendations">▲ Collapse</button>
+        <div class="sec-hdr-left"><span class="sec-num">10</span><h2 id="recommendations">Recommendations</h2></div>
+        <button class="sec-toggle" id="btn-recommendations">▲</button>
     </div>
     <div class="sec-body" id="body-recommendations">
     <p>Automated database diagnostic evaluations assessed against current active metrics:</p>
@@ -3965,7 +3998,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </div><!-- end .content -->
 
     <footer>
-        mysql_gather &nbsp;·&nbsp; Database Health Report &nbsp;·&nbsp; Inspired by the pg_gather philosophy
+        mysql_gather &nbsp;|&nbsp; Database Health Report &nbsp;|&nbsp; Copyright (c) 2026 aniljoshi2022 &nbsp;|&nbsp; MIT License 
     </footer>
 
     <script>
@@ -4000,17 +4033,12 @@ function toggleSec(id) {
     if (!body) return;
     if (body.classList.contains('collapsed')) {
         body.classList.remove('collapsed');
-        btn.textContent = '▲ Collapse';
+        btn.textContent = '▲';
     } else {
         body.classList.add('collapsed');
-        btn.textContent = '▼ Expand';
+        btn.textContent = '▼';
     }
 }
 </script>
 </body>
 </html>`
-
-
-
-
-
