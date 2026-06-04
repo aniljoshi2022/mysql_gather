@@ -1093,6 +1093,8 @@ func main() {
 	_ = db.QueryRow("SELECT VERSION();").Scan(&data.Summary.ServerVersion)
 	_ = db.QueryRow("SELECT @@transaction_isolation;").Scan(&data.Summary.TxnIsolation)
 
+	isMariaDB := strings.Contains(strings.ToLower(data.Summary.ServerVersion), "mariadb")
+
 	var ro int
 	if err := db.QueryRow("SELECT @@global.read_only;").Scan(&ro); err == nil {
 		if ro == 1 {
@@ -1103,91 +1105,45 @@ func main() {
 	}
 
 	var uptimeSeconds int64
-	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Uptime';").Scan(&uptimeSeconds)
-	if uptimeSeconds > 0 {
-		data.Summary.UptimeSec = fmt.Sprintf("%d", uptimeSeconds)
-		days := uptimeSeconds / 86400
-		hours := (uptimeSeconds % 86400) / 3600
-		minutes := (uptimeSeconds % 3600) / 60
-		data.Summary.Uptime = fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
-	}
-
-	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Threads_connected';").Scan(&data.Summary.Threads)
-	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Questions';").Scan(&data.Summary.Questions)
-	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Slow_queries';").Scan(&data.Summary.SlowQueries)
-	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Opened_tables';").Scan(&data.Summary.Opens)
-	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Flush_commands';").Scan(&data.Summary.FlushTables)
-	_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Open_tables';").Scan(&data.Summary.OpenTables)
-
-	if uptimeSeconds > 0 && data.Summary.Questions != "" {
-		qCount, _ := strconv.ParseFloat(data.Summary.Questions, 64)
-		data.Summary.QueriesPerSec = fmt.Sprintf("%.3f", qCount/float64(uptimeSeconds))
-	} else {
-		data.Summary.QueriesPerSec = "0.000"
-	}
 
 	variablesMap := make(map[string]string)
 	statusMap := make(map[string]string)
 
-	// Section 1: Consolidated Engine Metrics (Union All query as requested)
-	metricsQuery := `
-		SELECT 'Checkpoint Age' AS Metric, ROUND(COUNT / 1024 / 1024, 2) AS Value
-		FROM information_schema.innodb_metrics WHERE NAME = 'log_lsn_checkpoint_age'
-		UNION ALL
-		SELECT 'History list length' AS Metric, COUNT AS Value 
-		FROM information_schema.innodb_metrics WHERE NAME = 'trx_rseg_history_len'
-		UNION ALL
-		SELECT 'Pending normal aio reads', VARIABLE_VALUE 
-		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_data_pending_reads'
-		UNION ALL
-		SELECT 'Pending normal aio writes', VARIABLE_VALUE 
-		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_data_pending_writes'
-		UNION ALL
-		SELECT 'Pending flushes (log)', VARIABLE_VALUE 
-		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_os_log_pending_writes'
-		UNION ALL
-		SELECT 'Pending flushes (buffer pool)', VARIABLE_VALUE 
-		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_pages_flushed'
-		UNION ALL
-		SELECT 'Ibuf:size', COUNT 
-		FROM information_schema.innodb_metrics WHERE NAME = 'ibuf_size'
-		UNION ALL
-		SELECT 'Queries inside InnoDB', VARIABLE_VALUE 
-		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_thread_active'
-		UNION ALL
-		SELECT 'Queries in queue', VARIABLE_VALUE 
-		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_thread_queue'
-		UNION ALL
-		SELECT 'Total large memory allocated', VARIABLE_VALUE 
-		FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_bytes_data';`
-
-	if rows, err := db.Query(metricsQuery); err == nil {
+	// Section 1: Innodb metrics from information_schema.innodb_metrics
+	if rows, err := db.Query(`
+		SELECT NAME,
+		       CASE
+		           WHEN NAME = 'log_lsn_checkpoint_age' THEN ROUND(COUNT/1024/1024, 2)
+		           ELSE COUNT
+		       END AS VALUE
+		FROM information_schema.innodb_metrics
+		WHERE NAME IN ('log_lsn_checkpoint_age', 'trx_rseg_history_len', 'ibuf_size')
+	`); err == nil {
+		metrics := map[string]string{}
 		for rows.Next() {
-			var kv KeyVal
-			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
-				statusMap[strings.ToLower(kv.Key)] = kv.Value
-				if kv.Key == "Total large memory allocated" {
-					kv.Value = formatBytes(kv.Value)
+			var name string
+			var value sql.NullString
+			if err := rows.Scan(&name, &value); err == nil {
+				if value.Valid {
+					metrics[name] = value.String
 				}
-				data.EngineMetrics = append(data.EngineMetrics, kv)
 			}
 		}
 		rows.Close()
-	}
-	// #region agent log
-	for _, m := range data.EngineMetrics {
-		if m.Key == "Pending flushes (buffer pool)" {
-			debugLog("C", "main.go:engine-metrics", "buffer pool flush metric collected", map[string]interface{}{
-				"label": m.Key, "value": m.Value,
-				"note": "Innodb_buffer_pool_pages_flushed is cumulative since startup, not pending count",
-			})
-			break
+		if v, ok := metrics["log_lsn_checkpoint_age"]; ok {
+			data.EngineMetrics = append(data.EngineMetrics, KeyVal{"Checkpoint Age", v})
+		}
+		if v, ok := metrics["trx_rseg_history_len"]; ok {
+			data.EngineMetrics = append(data.EngineMetrics, KeyVal{"History list length", v})
+		}
+		if v, ok := metrics["ibuf_size"]; ok {
+			data.EngineMetrics = append(data.EngineMetrics, KeyVal{"Ibuf:size", v})
 		}
 	}
-	// #endregion
 
 	// Section 2: SHOW GLOBAL VARIABLES (formatted to human-readable)
-	if rows, err := db.Query("SHOW GLOBAL VARIABLES;"); err == nil {
+	globalVarQuery := "SHOW GLOBAL VARIABLES;"
+	if rows, err := db.Query(globalVarQuery); err == nil {
 		for rows.Next() {
 			var kv KeyVal
 			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
@@ -1200,7 +1156,8 @@ func main() {
 	}
 
 	// Section 3: SHOW GLOBAL STATUS (formatted to human-readable)
-	if rows, err := db.Query("SHOW GLOBAL STATUS;"); err == nil {
+	globalStatusQuery := "SHOW GLOBAL STATUS;"
+	if rows, err := db.Query(globalStatusQuery); err == nil {
 		for rows.Next() {
 			var kv KeyVal
 			if err := rows.Scan(&kv.Key, &kv.Value); err == nil {
@@ -1210,6 +1167,46 @@ func main() {
 			}
 		}
 		rows.Close()
+	}
+
+	appendEngineStatusMetric := func(label, key string) {
+		if v, ok := statusMap[strings.ToLower(key)]; ok && v != "" {
+			if label == "Total large memory allocated" {
+				v = formatBytes(v)
+			}
+			data.EngineMetrics = append(data.EngineMetrics, KeyVal{label, v})
+		}
+	}
+	appendEngineStatusMetric("Pending normal aio reads", "Innodb_data_pending_reads")
+	appendEngineStatusMetric("Pending normal aio writes", "Innodb_data_pending_writes")
+	appendEngineStatusMetric("Pending flushes (log)", "Innodb_os_log_pending_writes")
+	appendEngineStatusMetric("Pending flushes (buffer pool)", "Innodb_buffer_pool_pages_flushed")
+	appendEngineStatusMetric("Queries inside InnoDB", "Innodb_thread_active")
+	appendEngineStatusMetric("Queries in queue", "Innodb_thread_queue")
+	appendEngineStatusMetric("Total large memory allocated", "Innodb_buffer_pool_bytes_data")
+
+	// Populate summary values from global status
+	if uptimeValue, ok := statusMap["uptime"]; ok && uptimeValue != "" {
+		if up, err := strconv.ParseInt(uptimeValue, 10, 64); err == nil {
+			uptimeSeconds = up
+			data.Summary.UptimeSec = fmt.Sprintf("%d", uptimeSeconds)
+			days := uptimeSeconds / 86400
+			hours := (uptimeSeconds % 86400) / 3600
+			minutes := (uptimeSeconds % 3600) / 60
+			data.Summary.Uptime = fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
+		}
+	}
+	data.Summary.Threads = statusMap["threads_connected"]
+	data.Summary.Questions = statusMap["questions"]
+	data.Summary.SlowQueries = statusMap["slow_queries"]
+	data.Summary.Opens = statusMap["opened_tables"]
+	data.Summary.FlushTables = statusMap["flush_commands"]
+	data.Summary.OpenTables = statusMap["open_tables"]
+	if uptimeSeconds > 0 && data.Summary.Questions != "" {
+		qCount, _ := strconv.ParseFloat(data.Summary.Questions, 64)
+		data.Summary.QueriesPerSec = fmt.Sprintf("%.3f", qCount/float64(uptimeSeconds))
+	} else {
+		data.Summary.QueriesPerSec = "0.000"
 	}
 
 	// Section 4: SHOW ENGINE INNODB STATUS Raw Text
@@ -1285,8 +1282,8 @@ func main() {
 	}
 
 	// ── NEW: Replication Applier Worker Status ──────────────────────────────
-	// Mirrors: SELECT CHANNEL_NAME,WORKER_ID,LAST_ERROR_NUMBER,
-	//                 LAST_ERROR_MESSAGE,LAST_ERROR_TIMESTAMP
+	// Mirrors: SELECT CHANNEL_NAME, THREAD_ID, LAST_ERROR_NUMBER,
+	//                 LAST_ERROR_MESSAGE, LAST_ERROR_TIMESTAMP
 	//          FROM performance_schema.replication_applier_status_by_worker
 	workerSQL := `SELECT
 		IFNULL(CHANNEL_NAME, '') AS CHANNEL_NAME,
@@ -1296,6 +1293,16 @@ func main() {
 		IFNULL(DATE_FORMAT(LAST_ERROR_TIMESTAMP, '%Y-%m-%d %H:%i:%s.%f'), '') AS LAST_ERROR_TIMESTAMP
 	FROM performance_schema.replication_applier_status_by_worker
 	ORDER BY CHANNEL_NAME, WORKER_ID`
+	if isMariaDB {
+		workerSQL = `SELECT
+			IFNULL(CHANNEL_NAME, '') AS CHANNEL_NAME,
+			THREAD_ID,
+			LAST_ERROR_NUMBER,
+			IFNULL(LAST_ERROR_MESSAGE, '') AS LAST_ERROR_MESSAGE,
+			IFNULL(DATE_FORMAT(LAST_ERROR_TIMESTAMP, '%Y-%m-%d %H:%i:%s.%f'), '') AS LAST_ERROR_TIMESTAMP
+		FROM performance_schema.replication_applier_status_by_worker
+		ORDER BY CHANNEL_NAME, THREAD_ID`
+	}
 	if wrows, werr := db.Query(workerSQL); werr == nil {
 		for wrows.Next() {
 			var w ReplicaWorkerStatus
@@ -1327,20 +1334,26 @@ func main() {
 	}
 
 	// ── NEW: GTID State ──────────────────────────────────────────────────────
-	// Mirrors: SELECT * FROM performance_schema.global_variables
-	//          WHERE Variable_name IN ('gtid_executed','gtid_purged')
-	gtidSQL := `SELECT VARIABLE_NAME, IFNULL(VARIABLE_VALUE, '') AS VARIABLE_VALUE
-	FROM performance_schema.global_variables
-	WHERE VARIABLE_NAME IN ('gtid_executed', 'gtid_purged')
-	ORDER BY VARIABLE_NAME`
+	var gtidSQL string
+	if isMariaDB {
+		gtidSQL = `SELECT VARIABLE_NAME, IFNULL(VARIABLE_VALUE, '') AS VARIABLE_VALUE
+		FROM information_schema.global_variables
+		WHERE VARIABLE_NAME IN ('gtid_current_pos', 'gtid_slave_pos')
+		ORDER BY VARIABLE_NAME`
+	} else {
+		gtidSQL = `SELECT VARIABLE_NAME, IFNULL(VARIABLE_VALUE, '') AS VARIABLE_VALUE
+		FROM performance_schema.global_variables
+		WHERE VARIABLE_NAME IN ('gtid_executed', 'gtid_purged')
+		ORDER BY VARIABLE_NAME`
+	}
 	if grows, gerr := db.Query(gtidSQL); gerr == nil {
 		for grows.Next() {
 			var name, value string
 			if scanErr := grows.Scan(&name, &value); scanErr == nil {
 				switch strings.ToLower(name) {
-				case "gtid_executed":
+				case "gtid_executed", "gtid_current_pos":
 					data.GTIDInfo.GTIDExecuted = value
-				case "gtid_purged":
+				case "gtid_purged", "gtid_slave_pos":
 					data.GTIDInfo.GTIDPurged = value
 				}
 			}
