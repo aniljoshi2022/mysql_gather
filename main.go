@@ -83,6 +83,15 @@ type ProcessInfo struct {
 	Info    string
 }
 
+type BinlogEvent struct {
+	LogName   string
+	Pos       string
+	EventType string
+	ServerID  string
+	EndLogPos string
+	Info      string
+}
+
 // GroupMember holds details from performance_schema.replication_group_members
 type GroupMember struct {
 	ChannelName string
@@ -96,24 +105,32 @@ type GroupMember struct {
 
 // ReplicationStatus holds replica status info
 type ReplicationStatus struct {
-	ChannelName        string
-	ReplicaIORunning   string
-	ReplicaSQLRunning  string
-	SourceHost         string
-	SourceUser         string
-	SourcePort         string
-	MasterLogFile      string
-	ReadMasterLogPos   string
-	RelayLogFile       string
-	RelayLogPos        string
-	RelayMasterLogFile string
-	ExecMasterLogPos   string
-	SecondsBehind      string
-	RetrievedGtidSet   string
-	ExecutedGtidSet    string
-	LastIOError        string
-	LastSQLError       string
-	AutoPosition       string
+	ChannelName              string
+	ReplicaIORunning         string
+	ReplicaSQLRunning        string
+	SourceHost               string
+	SourceUser               string
+	SourcePort               string
+	MasterLogFile            string
+	ReadMasterLogPos         string
+	RelayLogFile             string
+	RelayLogPos              string
+	RelayMasterLogFile       string
+	ExecMasterLogPos         string
+	SecondsBehind            string
+	ReplicateDoDB            string
+	ReplicateIgnoreDB        string
+	ReplicateDoTable         string
+	ReplicateIgnoreTable     string
+	ReplicateWildDoTable     string
+	ReplicateWildIgnoreTable string
+	SQLDelay                 string
+	ReplicateRewriteDB       string
+	RetrievedGtidSet         string
+	ExecutedGtidSet          string
+	LastIOError              string
+	LastSQLError             string
+	AutoPosition             string
 }
 
 // ReplicaWorkerStatus holds per-worker applier error details
@@ -327,6 +344,38 @@ type Recommendation struct {
 	Type        string // CRITICAL, WARNING, INFO
 	Parameter   string
 	Description string
+}
+
+// SemaphoreEntry is a single ranked hotspot line parsed from the SEMAPHORES block
+type SemaphoreEntry struct {
+	Count    int
+	Location string
+}
+
+// SemaphoreCounters holds aggregate spin/wait counters from the SEMAPHORES block
+type SemaphoreCounters struct {
+	SpinWaits  string
+	SpinRounds string
+	OSWaits    string
+	SpinRatio  string // SpinRounds / OSWaits efficiency indicator
+}
+
+// InnodbMutex holds one row from SHOW ENGINE INNODB MUTEX
+type InnodbMutex struct {
+	Type   string
+	Name   string
+	Status string
+}
+
+// SemaphoreAnalysis is the fully parsed SEMAPHORES section
+type SemaphoreAnalysis struct {
+	WaitingAt       []SemaphoreEntry // "has waited at" file:line hotspots
+	Holders         []SemaphoreEntry // "has reserved it in mode" current holders
+	CreatedAt       []SemaphoreEntry // "created in file" mutex creation sites
+	LastWriteLocked []SemaphoreEntry // "Last time write locked" recent write-lock locations
+	Counters        SemaphoreCounters
+	RawBlock        string
+	MutexRows       []InnodbMutex // SHOW ENGINE INNODB MUTEX rows
 }
 
 // ── InnoDB ClusterSet topology structs ──────────────────────────────────────
@@ -598,6 +647,7 @@ type PageData struct {
 	EngineMetrics        []KeyVal
 	ConfigVariables      []KeyVal
 	StatusCounters       []KeyVal
+	SemiSyncDetails      []KeyVal
 	Processes            []ProcessInfo
 	GroupMembers         []GroupMember
 	ReplicationStates    []ReplicationStatus
@@ -610,9 +660,15 @@ type PageData struct {
 	WsrepProviderOptions []WsrepProviderOption
 	WsrepQueueMax        WsrepQueueMax
 	MasterStatus         []KeyVal
+	CurrentBinlogFile    string        // active binary log file from SHOW MASTER STATUS / SHOW BINARY LOG STATUS
+	BinaryLogCount       int           // total binary log files from SHOW BINARY LOGS
+	BinaryLogSize        int64         // total size in bytes for all binary logs
+	BinaryLogSizeHuman   string        // human readable total binary log size for display
+	CurrentBinlogEvents  []BinlogEvent // recent events from the active binary log file
 	ReplicaWorkers       []ReplicaWorkerStatus
 	GTIDInfo             GTIDInfo
 	InnodbStatus         string
+	SemaphoreAnalysis    SemaphoreAnalysis
 	MemoryEvents         []MemoryEvent
 	WaitEvents           []WaitEvent
 	FileIOEvents         []FileIOEvent
@@ -658,6 +714,150 @@ func formatBytes(valStr string) string {
 		return fmt.Sprintf("%.0f B", val)
 	}
 	return fmt.Sprintf("%.2f %s", val, suffixes[exp-1])
+}
+
+// parseSemaphores extracts mutex/semaphore hotspot analysis from SHOW ENGINE INNODB STATUS output.
+// It replicates the four summaries of the classic pt_print_semaphores_summary bash tool
+// entirely in Go with zero OS dependencies.
+func parseSemaphores(innodbStatus string) SemaphoreAnalysis {
+	var result SemaphoreAnalysis
+
+	// Extract the SEMAPHORES block between "SEMAPHORES" and the next "--------" section header
+	semStart := strings.Index(innodbStatus, "SEMAPHORES")
+	if semStart == -1 {
+		return result
+	}
+	// Find the next section separator after SEMAPHORES
+	rest := innodbStatus[semStart:]
+	semEnd := strings.Index(rest[20:], "----------")
+	var block string
+	if semEnd == -1 {
+		block = rest
+	} else {
+		block = rest[:semEnd+20]
+	}
+	result.RawBlock = block
+
+	// frequency map helper
+	type freqEntry struct {
+		loc   string
+		count int
+	}
+	buildTop := func(lines []string) []SemaphoreEntry {
+		freq := map[string]int{}
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if l != "" {
+				freq[l]++
+			}
+		}
+		var entries []SemaphoreEntry
+		for loc, cnt := range freq {
+			entries = append(entries, SemaphoreEntry{Count: cnt, Location: loc})
+		}
+		// sort descending by count
+		for i := 0; i < len(entries); i++ {
+			for j := i + 1; j < len(entries); j++ {
+				if entries[j].Count > entries[i].Count {
+					entries[i], entries[j] = entries[j], entries[i]
+				}
+			}
+		}
+		if len(entries) > 20 {
+			entries = entries[:20]
+		}
+		return entries
+	}
+
+	var waitingAtLines, holderLines, createdAtLines, writeLockedLines []string
+
+	for _, line := range strings.Split(block, "\n") {
+		// "has waited at buf0buf.cc line 4321"  -> extract "file line N"
+		if idx := strings.Index(line, "has waited at"); idx != -1 {
+			parts := strings.Fields(line[idx+len("has waited at"):])
+			if len(parts) >= 3 {
+				waitingAtLines = append(waitingAtLines, parts[0]+" line "+parts[2])
+			} else if len(parts) >= 1 {
+				waitingAtLines = append(waitingAtLines, parts[0])
+			}
+		}
+		// "has reserved it in mode ..."
+		if idx := strings.Index(line, "has reserved it in mode"); idx != -1 {
+			holderLines = append(holderLines, strings.TrimSpace(line))
+		}
+		// "created in file buf0buf.cc line 123"  strip address tokens
+		if idx := strings.Index(line, "created in file"); idx != -1 {
+			sub := line[idx:]
+			// remove hex addresses like "at 0x7f1234abcd"
+			var cleaned []string
+			for _, tok := range strings.Fields(sub) {
+				if strings.HasPrefix(tok, "0x") || strings.HasPrefix(tok, "at") {
+					continue
+				}
+				cleaned = append(cleaned, tok)
+			}
+			createdAtLines = append(createdAtLines, strings.Join(cleaned, " "))
+		}
+		// "Last time write locked in file row0sel.cc line 5678"
+		if idx := strings.Index(line, "Last time write locked"); idx != -1 {
+			writeLockedLines = append(writeLockedLines, strings.TrimSpace(line[idx:]))
+		}
+	}
+
+	result.WaitingAt = buildTop(waitingAtLines)
+	result.Holders = buildTop(holderLines)
+	result.CreatedAt = buildTop(createdAtLines)
+	result.LastWriteLocked = buildTop(writeLockedLines)
+
+	// Parse aggregate counters.
+	// MySQL <= 8.0: "Mutex spin waits N, rounds M, OS waits K"
+	// MySQL 8.4+:  separate lines "RW-shared spins N, rounds M, OS waits K"
+	//               and            "Spin rounds per wait: X RW-shared, Y RW-excl, Z RW-sx"
+	var totalSpinWaits, totalSpinRounds, totalOSWaits float64
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimSpace(line)
+		// Old format
+		if strings.HasPrefix(line, "Mutex spin waits") {
+			parts := strings.Split(line, ",")
+			if len(parts) >= 3 {
+				totalSpinWaits, _ = strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(parts[0], "Mutex spin waits")), 64)
+				totalSpinRounds, _ = strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(parts[1]), "rounds")), 64)
+				totalOSWaits, _ = strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(parts[2]), "OS waits")), 64)
+			}
+		}
+		// New format — accumulate across RW-shared / RW-excl / RW-sx lines
+		if strings.HasPrefix(line, "RW-shared spins") || strings.HasPrefix(line, "RW-excl spins") || strings.HasPrefix(line, "RW-sx spins") {
+			parts := strings.Split(line, ",")
+			// parts[0]: "RW-shared spins N"  parts[1]: " rounds M"  parts[2]: " OS waits K"
+			if len(parts) >= 3 {
+				spinsStr := strings.Fields(parts[0])
+				if len(spinsStr) >= 3 {
+					v, _ := strconv.ParseFloat(spinsStr[len(spinsStr)-1], 64)
+					totalSpinWaits += v
+				}
+				roundsStr := strings.Fields(parts[1])
+				if len(roundsStr) >= 2 {
+					v, _ := strconv.ParseFloat(roundsStr[len(roundsStr)-1], 64)
+					totalSpinRounds += v
+				}
+				osStr := strings.Fields(parts[2])
+				if len(osStr) >= 3 {
+					v, _ := strconv.ParseFloat(osStr[len(osStr)-1], 64)
+					totalOSWaits += v
+				}
+			}
+		}
+	}
+	result.Counters.SpinWaits = fmt.Sprintf("%.0f", totalSpinWaits)
+	result.Counters.SpinRounds = fmt.Sprintf("%.0f", totalSpinRounds)
+	result.Counters.OSWaits = fmt.Sprintf("%.0f", totalOSWaits)
+	if totalOSWaits > 0 {
+		result.Counters.SpinRatio = fmt.Sprintf("%.1f", totalSpinRounds/totalOSWaits)
+	} else {
+		result.Counters.SpinRatio = "0"
+	}
+
+	return result
 }
 
 // Format status keys to check if they should be converted to human readable forms
@@ -1169,6 +1369,32 @@ func main() {
 		rows.Close()
 	}
 
+	// Section 5a: Semi-synchronous replication detail variables
+	semiSyncKeys := []string{
+		"rpl_semi_sync_master_enabled",
+		"rpl_semi_sync_slave_enabled",
+		"rpl_semi_sync_master_timeout",
+		"rpl_semi_sync_master_wait_point",
+		"rpl_semi_sync_master_wait_for_slave_count",
+		"Rpl_semi_sync_master_tx_waits",
+		"Rpl_semi_sync_master_tx_wait_time",
+		"Rpl_semi_sync_master_clients",
+		"Rpl_semi_sync_master_net_wait_time",
+		"Rpl_semi_sync_master_no_tx",
+	}
+	for _, key := range semiSyncKeys {
+		value := ""
+		if v, ok := variablesMap[strings.ToLower(key)]; ok && v != "" {
+			value = v
+		} else if v, ok := statusMap[strings.ToLower(key)]; ok && v != "" {
+			value = v
+		}
+		if value == "" {
+			value = "N/A"
+		}
+		data.SemiSyncDetails = append(data.SemiSyncDetails, KeyVal{Key: key, Value: toHumanReadable(key, value)})
+	}
+
 	appendEngineStatusMetric := func(label, key string) {
 		if v, ok := statusMap[strings.ToLower(key)]; ok && v != "" {
 			if label == "Total large memory allocated" {
@@ -1214,6 +1440,18 @@ func main() {
 	var statusText string
 	if err := db.QueryRow("SHOW ENGINE INNODB STATUS;").Scan(&engine, &statusText, &statusText); err == nil {
 		data.InnodbStatus = statusText
+		data.SemaphoreAnalysis = parseSemaphores(statusText)
+	}
+
+	// Collect SHOW ENGINE INNODB MUTEX into SemaphoreAnalysis
+	if mutexRows, err := db.Query("SHOW ENGINE INNODB MUTEX;"); err == nil {
+		for mutexRows.Next() {
+			var m InnodbMutex
+			if err := mutexRows.Scan(&m.Type, &m.Name, &m.Status); err == nil {
+				data.SemaphoreAnalysis.MutexRows = append(data.SemaphoreAnalysis.MutexRows, m)
+			}
+		}
+		mutexRows.Close()
 	}
 
 	// Section 5: HA / Replication Topology Consolidated
@@ -1823,10 +2061,14 @@ print(JSON.stringify(out));
 	// #endregion
 
 	// Section 6: Current Binary Log Status
+	// This section gathers the current master/binlog status, then computes the
+	// total number and total size of all binary log files. It also captures
+	// recent events from the current active binary log file for diagnostics.
 	binlogRows, bErr := db.Query("SHOW BINARY LOG STATUS;")
 	if bErr != nil {
 		binlogRows, bErr = db.Query("SHOW MASTER STATUS;")
 	}
+	currentBinlogFile := ""
 	if bErr == nil {
 		cols, _ := binlogRows.Columns()
 		if binlogRows.Next() {
@@ -1837,11 +2079,65 @@ print(JSON.stringify(out));
 			}
 			if err := binlogRows.Scan(scanArgs...); err == nil {
 				for i, col := range cols {
-					data.MasterStatus = append(data.MasterStatus, KeyVal{Key: col, Value: string(values[i])})
+					val := string(values[i])
+					data.MasterStatus = append(data.MasterStatus, KeyVal{Key: col, Value: val})
+					if strings.EqualFold(col, "File") || strings.EqualFold(col, "Log_name") {
+						currentBinlogFile = val
+					}
 				}
 			}
 		}
 		binlogRows.Close()
+	}
+
+	if currentBinlogFile == "" {
+		for _, kv := range data.MasterStatus {
+			if strings.EqualFold(kv.Key, "File") || strings.EqualFold(kv.Key, "Log_name") {
+				currentBinlogFile = kv.Value
+				break
+			}
+		}
+	}
+	// Preserve the active binary log file name for the HTML report and later event lookup.
+	data.CurrentBinlogFile = currentBinlogFile
+
+	// Count all available binary log files and accumulate their byte sizes.
+	if logsRows, err := db.Query("SHOW BINARY LOGS;"); err == nil {
+		defer logsRows.Close()
+		for logsRows.Next() {
+			var logName string
+			var fileSize sql.NullInt64
+			var encrypted sql.NullString
+			if err := logsRows.Scan(&logName, &fileSize, &encrypted); err == nil {
+				data.BinaryLogCount++
+				if fileSize.Valid {
+					data.BinaryLogSize += fileSize.Int64
+				}
+			}
+		}
+		data.BinaryLogSizeHuman = formatBytes(strconv.FormatInt(data.BinaryLogSize, 10))
+	}
+
+	if currentBinlogFile != "" {
+		// Capture the most recent events from the current active log file.
+		query := fmt.Sprintf("SHOW BINLOG EVENTS IN '%s' LIMIT 20;", currentBinlogFile)
+		if eventsRows, err := db.Query(query); err == nil {
+			defer eventsRows.Close()
+			for eventsRows.Next() {
+				var event BinlogEvent
+				var serverID sql.NullString
+				var info sql.NullString
+				if err := eventsRows.Scan(&event.LogName, &event.Pos, &event.EventType, &serverID, &event.EndLogPos, &info); err == nil {
+					if serverID.Valid {
+						event.ServerID = serverID.String
+					}
+					if info.Valid {
+						event.Info = info.String
+					}
+					data.CurrentBinlogEvents = append(data.CurrentBinlogEvents, event)
+				}
+			}
+		}
 	}
 
 	// Section 7: Process List - SHOW FULL PROCESSLIST details
@@ -2443,6 +2739,14 @@ print(JSON.stringify(out));
 		"mod3": func(i int) int {
 			return i % 3
 		},
+		"masterStatusValue": func(items []KeyVal, key string) string {
+			for _, kv := range items {
+				if strings.EqualFold(kv.Key, key) {
+					return kv.Value
+				}
+			}
+			return ""
+		},
 	}).Parse(htmlTemplate)
 	if err != nil {
 		log.Fatalf("Failed to compile layout elements: %v", err)
@@ -2758,6 +3062,7 @@ const htmlTemplate = `<!DOCTYPE html>
         <a href="#config">Configuration Variables</a><span class="sec-nav-sep">·</span>
         <a href="#status">Status Variables</a><span class="sec-nav-sep">·</span>
         <a href="#innodb">InnoDB Monitor Stats</a><span class="sec-nav-sep">·</span>
+        <a href="#mutexes">Mutexes / Semaphores</a><span class="sec-nav-sep">·</span>
         <a href="#replication">HA &amp; Replication</a><span class="sec-nav-sep">·</span>
         <a href="#replica-source">Binary Log Status</a><span class="sec-nav-sep">·</span>
         <a href="#process">Process List &amp; Query Locks </a><span class="sec-nav-sep">·</span>
@@ -2805,16 +3110,12 @@ const htmlTemplate = `<!DOCTYPE html>
             <th>Read Only status</th>
             <td><strong>{{.Summary.ReadOnly}}</strong></td>
             <th>Cluster Flow Control Status</th>
-            <td><strong style="color: #c53030;">{{.Summary.ClusterFlowControl}}</strong></td>
+            <td><strong style="{{if eq .Summary.ClusterFlowControl "Inactive (Healthy)"}}color: #22543d{{else if eq .Summary.ClusterFlowControl "Not Configured / Single Instance"}}color: #744210{{else}}color: #c53030{{end}}">{{.Summary.ClusterFlowControl}}</strong></td>
         </tr>
-    </table>
-
-    <h3>mysqladmin Status Metrics</h3>
-    <table style="max-width: 800px; margin-bottom: 20px;">
         <tr>
-            <th width="25%">Threads Connected</th>
+            <th>Threads Connected</th>
             <td>{{.Summary.Threads}}</td>
-            <th width="20%">Total Questions</th>
+            <th>Total Questions</th>
             <td>{{.Summary.Questions}}</td>
         </tr>
         <tr>
@@ -2835,25 +3136,16 @@ const htmlTemplate = `<!DOCTYPE html>
         </tr>
     </table>
 
-    <h3>InnoDB Core Engine Metrics</h3>
-    <table style="max-width: 750px;">
-        <thead>
-            <tr>
-                <th width="65%">Metric Identifier</th>
-                <th>Telemetry Value</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range .EngineMetrics}}
-            <tr>
-                <td><strong>{{.Key}}</strong></td>
-                <td>{{.Value}}</td>
-            </tr>
-            {{else}}
-            <tr><td colspan="2">No engine metrics collected.</td></tr>
-            {{end}}
-        </tbody>
-    </table>
+    {{if .EngineMetrics}}
+    <div style="display:flex; flex-wrap:wrap; gap:8px; max-width:800px; margin-bottom:16px;">
+        {{range .EngineMetrics}}
+        <div style="flex:1 1 180px; min-width:160px; max-width:240px; background:#f0f6ff; border:1px solid #bee3f8; border-radius:6px; padding:8px 12px;">
+            <div style="font-size:9.5px; color:#2c5282; font-weight:600; text-transform:uppercase; letter-spacing:.4px; margin-bottom:3px;">{{.Key}}</div>
+            <div style="font-size:13px; font-weight:700; color:#1a202c;">{{.Value}}</div>
+        </div>
+        {{end}}
+    </div>
+    {{end}}
 
     <!-- 2. Critical Configurations -->
     </div><!-- end sec-body -->
@@ -2926,20 +3218,152 @@ const htmlTemplate = `<!DOCTYPE html>
     <div class="sec-body" id="body-innodb">
     <pre>{{.InnodbStatus}}</pre>
 
-    <!-- 5. HA / Replication Topology Consolidated -->
+    <!-- 5. Mutexes / Semaphores Analysis -->
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('mutexes')">
+        <div class="sec-hdr-left"><span class="sec-num">5</span><h2 id="mutexes">Mutexes / Semaphores</h2></div>
+        <button class="sec-toggle" id="btn-mutexes">▲</button>
+    </div>
+    <div class="sec-body" id="body-mutexes">
+
+    {{if .SemaphoreAnalysis.RawBlock}}
+
+    <!-- Aggregate counters -->
+    <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:20px; max-width:860px;">
+        <div style="flex:1 1 160px; background:#f0f6ff; border:1px solid #bee3f8; border-radius:6px; padding:10px 14px;">
+            <div style="font-size:9.5px; color:#2c5282; font-weight:600; text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px;">Spin Waits</div>
+            <div style="font-size:18px; font-weight:700; color:#1a202c;">{{.SemaphoreAnalysis.Counters.SpinWaits}}</div>
+        </div>
+        <div style="flex:1 1 160px; background:#f0f6ff; border:1px solid #bee3f8; border-radius:6px; padding:10px 14px;">
+            <div style="font-size:9.5px; color:#2c5282; font-weight:600; text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px;">Spin Rounds</div>
+            <div style="font-size:18px; font-weight:700; color:#1a202c;">{{.SemaphoreAnalysis.Counters.SpinRounds}}</div>
+        </div>
+        <div style="flex:1 1 160px; background:#fff8f0; border:1px solid #fbd38d; border-radius:6px; padding:10px 14px;">
+            <div style="font-size:9.5px; color:#7b341e; font-weight:600; text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px;">OS Waits</div>
+            <div style="font-size:18px; font-weight:700; color:#c05621;">{{.SemaphoreAnalysis.Counters.OSWaits}}</div>
+        </div>
+        <div style="flex:1 1 160px; background:#f0fff4; border:1px solid #9ae6b4; border-radius:6px; padding:10px 14px;">
+            <div style="font-size:9.5px; color:#22543d; font-weight:600; text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px;">Spin / OS Ratio</div>
+            <div style="font-size:18px; font-weight:700; color:#276749;">{{if .SemaphoreAnalysis.Counters.SpinRatio}}{{.SemaphoreAnalysis.Counters.SpinRatio}}x{{else}}—{{end}}</div>
+        </div>
+    </div>
+
+    <!-- Waiting At hotspots -->
+    {{if .SemaphoreAnalysis.WaitingAt}}
+    <h3>Threads Waiting At (file:line hotspots)</h3>
+    <table style="max-width:700px;">
+        <thead><tr><th width="80">Count</th><th>Source Location</th></tr></thead>
+        <tbody>
+        {{range .SemaphoreAnalysis.WaitingAt}}
+        <tr>
+            <td><strong style="{{if gt .Count 5}}color:#c05621;{{end}}">{{.Count}}</strong></td>
+            <td><code>{{.Location}}</code></td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    <!-- Mutex Holders -->
+    {{if .SemaphoreAnalysis.Holders}}
+    <h3>Threads Holding Mutexes</h3>
+    <table style="max-width:900px;">
+        <thead><tr><th width="80">Count</th><th>Details</th></tr></thead>
+        <tbody>
+        {{range .SemaphoreAnalysis.Holders}}
+        <tr>
+            <td><strong>{{.Count}}</strong></td>
+            <td><small>{{.Location}}</small></td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    <!-- Mutex Creation Sites -->
+    {{if .SemaphoreAnalysis.CreatedAt}}
+    <h3>Mutex Creation Sites</h3>
+    <table style="max-width:700px;">
+        <thead><tr><th width="80">Count</th><th>Created In</th></tr></thead>
+        <tbody>
+        {{range .SemaphoreAnalysis.CreatedAt}}
+        <tr>
+            <td><strong>{{.Count}}</strong></td>
+            <td><code>{{.Location}}</code></td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    <!-- Last Write Locked -->
+    {{if .SemaphoreAnalysis.LastWriteLocked}}
+    <h3>Last Write-Lock Locations</h3>
+    <table style="max-width:700px;">
+        <thead><tr><th width="80">Count</th><th>Location</th></tr></thead>
+        <tbody>
+        {{range .SemaphoreAnalysis.LastWriteLocked}}
+        <tr>
+            <td><strong>{{.Count}}</strong></td>
+            <td><code>{{.Location}}</code></td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    <!-- SHOW ENGINE INNODB MUTEX output -->
+    {{if .SemaphoreAnalysis.MutexRows}}
+    <h3>Innodb Mutex Status</h3>
+    <table style="max-width:900px;">
+        <thead>
+            <tr>
+                <th width="80">Type</th>
+                <th>Name</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .SemaphoreAnalysis.MutexRows}}
+        <tr>
+            <td>{{.Type}}</td>
+            <td><code>{{.Name}}</code></td>
+            <td>{{.Status}}</td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <h3>SHOW ENGINE INNODB MUTEX</h3>
+    <p style="color:#718096; font-size:12px;">No mutex rows returned — no active contention or command not supported.</p>
+    {{end}}
+
+    <!-- Raw SEMAPHORES block -->
+    <h3>Raw Semaphores Block</h3>
+    <pre style="font-size:10px; max-height:260px; overflow-y:auto;">{{.SemaphoreAnalysis.RawBlock}}</pre>
+
+    {{else}}
+    <p style="color:#718096; font-size:12px;">No SEMAPHORES data found — SHOW ENGINE INNODB STATUS output may be unavailable or empty.</p>
+    {{end}}
+
+    <!-- 6. HA / Replication Topology Consolidated -->
     </div><!-- end sec-body -->
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('replication')">
-        <div class="sec-hdr-left"><span class="sec-num">5</span><h2 id="replication">HA &amp; Replication Topology</h2></div>
+        <div class="sec-hdr-left"><span class="sec-num">6</span><h2 id="replication">HA &amp; Replication Topology</h2></div>
         <button class="sec-toggle" id="btn-replication">▲</button>
     </div>
     <div class="sec-body" id="body-replication">
     
-    <h3>Replication Slave / Replica Channels Status</h3>
+    <h3>Async Replication</h3>
     {{if .ReplicationStates}}
+    {{ $root := . }}
     {{range .ReplicationStates}}
-    <table style="max-width:900px; margin-bottom:6px;">
+    <div style="overflow-x:auto; margin-bottom:20px;">
+    <table style="min-width:2200px; width:100%; margin-bottom:0;">
         <thead>
             <tr>
                 <th>Channel</th>
@@ -2950,6 +3374,20 @@ const htmlTemplate = `<!DOCTYPE html>
                 <th>Source Port</th>
                 <th>Lag (s)</th>
                 <th>Auto Position</th>
+                <th>Source Log File</th>
+                <th>Read Source Log Pos</th>
+                <th>Relay Log File</th>
+                <th>Relay Log Pos</th>
+                <th>Relay Source Log File</th>
+                <th>Exec Source Log Pos</th>
+                <th>Replicate_Do_DB</th>
+                <th>Replicate_Ignore_DB</th>
+                <th>Replicate_Do_Table</th>
+                <th>Replicate_Ignore_Table</th>
+                <th>Replicate_Wild_Do_Table</th>
+                <th>Replicate_Wild_Ignore_Table</th>
+                <th>SQL_Delay</th>
+                <th>Replicate_Rewrite_DB</th>
             </tr>
         </thead>
         <tbody>
@@ -2962,46 +3400,43 @@ const htmlTemplate = `<!DOCTYPE html>
                 <td>{{.SourcePort}}</td>
                 <td><strong>{{.SecondsBehind}}</strong></td>
                 <td>{{.AutoPosition}}</td>
-            </tr>
-        </tbody>
-    </table>
-    <table style="max-width:900px; margin-bottom:20px;">
-        <thead>
-            <tr>
-                <th>Master Log File</th>
-                <th>Read Master Log Pos</th>
-                <th>Relay Log File</th>
-                <th>Relay Log Pos</th>
-                <th>Relay Master Log File</th>
-                <th>Exec Master Log Pos</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td><code>{{.MasterLogFile}}</code></td>
+                <td><code style="white-space:nowrap;">{{.MasterLogFile}}</code></td>
                 <td class="text-right">{{.ReadMasterLogPos}}</td>
-                <td><code>{{.RelayLogFile}}</code></td>
+                <td><code style="white-space:nowrap;">{{.RelayLogFile}}</code></td>
                 <td class="text-right">{{.RelayLogPos}}</td>
-                <td><code>{{.RelayMasterLogFile}}</code></td>
+                <td><code style="white-space:nowrap;">{{.RelayMasterLogFile}}</code></td>
                 <td class="text-right">{{.ExecMasterLogPos}}</td>
+                <td><small>{{if .ReplicateDoDB}}{{.ReplicateDoDB}}{{else}}—{{end}}</small></td>
+                <td><small>{{if .ReplicateIgnoreDB}}{{.ReplicateIgnoreDB}}{{else}}—{{end}}</small></td>
+                <td><small>{{if .ReplicateDoTable}}{{.ReplicateDoTable}}{{else}}—{{end}}</small></td>
+                <td><small>{{if .ReplicateIgnoreTable}}{{.ReplicateIgnoreTable}}{{else}}—{{end}}</small></td>
+                <td><small>{{if .ReplicateWildDoTable}}{{.ReplicateWildDoTable}}{{else}}—{{end}}</small></td>
+                <td><small>{{if .ReplicateWildIgnoreTable}}{{.ReplicateWildIgnoreTable}}{{else}}—{{end}}</small></td>
+                <td><small>{{if .SQLDelay}}{{.SQLDelay}}{{else}}—{{end}}</small></td>
+                <td><small>{{if .ReplicateRewriteDB}}{{.ReplicateRewriteDB}}{{else}}—{{end}}</small></td>
             </tr>
         </tbody>
     </table>
-    {{if or .RetrievedGtidSet .ExecutedGtidSet}}
-    <table style="max-width:900px; margin-bottom:20px;">
+    </div>
+    {{if or .RetrievedGtidSet .ExecutedGtidSet $root.GTIDInfo.GTIDPurged}}
+    <div style="overflow-x:auto; margin-bottom:20px;">
+    <table style="min-width:900px; width:100%; margin-bottom:0;">
         <thead>
             <tr>
                 <th>Retrieved GTID Set</th>
+                <th>gtid_purged</th>
                 <th>Executed GTID Set</th>
             </tr>
         </thead>
         <tbody>
             <tr>
-                <td><small><code>{{if .RetrievedGtidSet}}{{.RetrievedGtidSet}}{{else}}—{{end}}</code></small></td>
-                <td><small><code>{{if .ExecutedGtidSet}}{{.ExecutedGtidSet}}{{else}}—{{end}}</code></small></td>
+                <td><small><code style="white-space:nowrap;">{{if .RetrievedGtidSet}}{{.RetrievedGtidSet}}{{else}}—{{end}}</code></small></td>
+                <td><small><code style="white-space:nowrap;">{{if $root.GTIDInfo.GTIDPurged}}{{ $root.GTIDInfo.GTIDPurged }}{{else}}—{{end}}</code></small></td>
+                <td><small><code style="white-space:nowrap;">{{if .ExecutedGtidSet}}{{.ExecutedGtidSet}}{{else}}—{{end}}</code></small></td>
             </tr>
         </tbody>
     </table>
+    </div>
     {{end}}
     {{if or .LastIOError .LastSQLError}}
     <table style="max-width:900px; margin-bottom:20px;">
@@ -3024,38 +3459,27 @@ const htmlTemplate = `<!DOCTYPE html>
     <table><tbody><tr><td>No active replica / replication channels configured on this node.</td></tr></tbody></table>
     {{end}}
 
-    <!-- ═══ GTID State ═══════════════════════════════════════════════════════ -->
-    <h3>GTID State</h3>
+    <h3>Semi-Sync Replication Stats</h3>
+    {{if .SemiSyncDetails}}
     <table style="max-width:900px; margin-bottom:20px;">
         <thead>
             <tr>
-                <th width="18%">VARIABLE_NAME</th>
-                <th>VARIABLE_VALUE</th>
+                <th style="width:55%;">Variable</th>
+                <th style="width:45%;">Value</th>
             </tr>
         </thead>
         <tbody>
+            {{range .SemiSyncDetails}}
             <tr>
-                <td><strong>gtid_executed</strong></td>
-                <td>
-                    {{if .GTIDInfo.GTIDExecuted}}
-                        <code style="word-break:break-all;font-size:11px;">{{.GTIDInfo.GTIDExecuted}}</code>
-                    {{else}}
-                        <em style="color:#999;">(empty — GTID mode not enabled or no transactions executed yet)</em>
-                    {{end}}
-                </td>
+                <td><strong>{{.Key}}</strong></td>
+                <td>{{.Value}}</td>
             </tr>
-            <tr>
-                <td><strong>gtid_purged</strong></td>
-                <td>
-                    {{if .GTIDInfo.GTIDPurged}}
-                        <code style="word-break:break-all;font-size:11px;">{{.GTIDInfo.GTIDPurged}}</code>
-                    {{else}}
-                        <em style="color:#999;">(empty)</em>
-                    {{end}}
-                </td>
-            </tr>
+            {{end}}
         </tbody>
     </table>
+    {{else}}
+    <p><em>No semi-synchronous replication variables found.</em></p>
+    {{end}}
 
     <!-- ═══ Replication Applier Worker Status ═══════════════════════════════ -->
     <h3>Replication Applier Worker Status</h3>
@@ -3341,9 +3765,9 @@ const htmlTemplate = `<!DOCTYPE html>
             <tr><td>Global Status</td>
                 <td><strong style="{{if eq $topo.Status "HEALTHY"}}color:green{{else}}color:#c00{{end}}">{{$topo.Status}}</strong></td>
             </tr>
-            <tr><td>Global Primary Instance</td><td><code>{{$topo.GlobalPrimaryInstance}}</code></td></tr>
+            <tr><td>Global Primary Instance</td><td>{{if $topo.GlobalPrimaryInstance}}<code>{{$topo.GlobalPrimaryInstance}}</code>{{end}}</td></tr>
             <tr><td>Primary Cluster (DC)</td><td><strong>{{$topo.PrimaryCluster}}</strong></td></tr>
-            <tr><td>Metadata Server</td><td><code>{{$topo.MetadataServer}}</code></td></tr>
+            <tr><td>Metadata Server</td><td>{{if $topo.MetadataServer}}<code>{{$topo.MetadataServer}}</code>{{end}}</td></tr>
         </tbody>
     </table>
 
@@ -3351,7 +3775,7 @@ const htmlTemplate = `<!DOCTYPE html>
     {{if $topo.PrimaryClusterData}}
     {{$pc := $topo.PrimaryClusterData}}
     <h4 style="color:#1a5276;">&#9654; Primary Cluster (DC): {{$pc.Name}}
-        <span style="font-weight:normal;font-size:12px;color:#555;"> — {{$pc.StatusText}}</span>
+        {{if $pc.StatusText}}<span style="font-weight:normal;font-size:12px;color:#555;"> — {{$pc.StatusText}}</span>{{end}}
     </h4>
     <table style="max-width:900px; margin-bottom:8px;">
         <thead>
@@ -3391,7 +3815,7 @@ const htmlTemplate = `<!DOCTYPE html>
     {{range $topo.ReplicaClusters}}
     {{$rc := .}}
     <h4 style="color:#922b21;">&#9654; Secondary Cluster (DR): {{$rc.Name}}
-        <span style="font-weight:normal;font-size:12px;color:#555;"> — {{$rc.StatusText}}</span>
+        {{if $rc.StatusText}}<span style="font-weight:normal;font-size:12px;color:#555;"> — {{$rc.StatusText}}</span>{{end}}
     </h4>
     <table style="max-width:900px; margin-bottom:8px;">
         <thead>
@@ -3434,7 +3858,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </table>
     <!-- ClusterSet Replication Channel (DC → DR async link) -->
     {{if $rc.CSReplSource}}
-    <h5 style="margin:6px 0 4px;color:#444;">ClusterSet Replication Channel (DC → DR)</h5>
+    <h5 style="margin:6px 0 4px;color:#444;">ClusterSet Async Replication Channel (DC → DR)</h5>
     <table style="max-width:900px; margin-bottom:18px;">
         <thead>
             <tr>
@@ -3575,35 +3999,90 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('replica-source')">
-        <div class="sec-hdr-left"><span class="sec-num">6</span><h2 id="replica-source">Binary Log Status</h2></div>
+        <div class="sec-hdr-left"><span class="sec-num">7</span><h2 id="replica-source">Binary Log Status</h2></div>
         <button class="sec-toggle" id="btn-replica-source">▲</button>
     </div>
     <div class="sec-body" id="body-replica-source">
-    <table style="max-width: 600px;">
+    {{if .MasterStatus}}
+    <table style="max-width: 100%; margin-top: 10px;">
         <thead>
             <tr>
-                <th>Coordinate Name</th>
-                <th>Current Position / File</th>
+                <th>File</th>
+                <th>Position</th>
+                <th>Binlog_Do_DB</th>
+                <th>Binlog_Ignore_DB</th>
+                <th>Executed_Gtid_Set</th>
             </tr>
         </thead>
         <tbody>
-            {{range .MasterStatus}}
             <tr>
-                <td><strong>{{.Key}}</strong></td>
-                <td>{{.Value}}</td>
+                <td>{{.CurrentBinlogFile}}</td>
+                <td>{{masterStatusValue .MasterStatus "Position"}}</td>
+                <td>{{masterStatusValue .MasterStatus "Binlog_Do_DB"}}</td>
+                <td>{{masterStatusValue .MasterStatus "Binlog_Ignore_DB"}}</td>
+                <td>{{masterStatusValue .MasterStatus "Executed_Gtid_Set"}}</td>
             </tr>
-            {{else}}
+        </tbody>
+    </table>
+    {{else}}
+    <table style="max-width: 600px; margin-top: 10px;">
+        <tbody>
             <tr><td colspan="2">Local binary logging parameters are inactive or master status is empty.</td></tr>
+        </tbody>
+    </table>
+    {{end}}
+
+    {{if .BinaryLogCount}}
+    <table style="max-width: 600px; margin-top: 10px;">
+        <thead>
+            <tr>
+                <th>Binary Log Count</th>
+                <th>Total Binary Log Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>{{.BinaryLogCount}}</td>
+                <td>{{if .BinaryLogSizeHuman}}{{.BinaryLogSizeHuman}}{{else}}{{.BinaryLogSize}}{{end}}</td>
+            </tr>
+        </tbody>
+    </table>
+    {{end}}
+
+    {{if .CurrentBinlogEvents}}
+    <h3 style="margin-top: 16px;">Recent Events for Current Binary Log</h3>
+    <table style="max-width: 100%;">
+        <thead>
+            <tr>
+                <th>Log Name</th>
+                <th>Pos</th>
+                <th>Event Type</th>
+                <th>Server ID</th>
+                <th>End Log Pos</th>
+                <th>Info</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .CurrentBinlogEvents}}
+            <tr>
+                <td>{{.LogName}}</td>
+                <td>{{.Pos}}</td>
+                <td>{{.EventType}}</td>
+                <td>{{.ServerID}}</td>
+                <td>{{.EndLogPos}}</td>
+                <td>{{.Info}}</td>
+            </tr>
             {{end}}
         </tbody>
     </table>
+    {{end}}
 
     <!-- 7. Process List & Query History -->
     </div><!-- end sec-body -->
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('process')">
-        <div class="sec-hdr-left"><span class="sec-num">7</span><h2 id="process">Process List &amp; Query Locks</h2></div>
+        <div class="sec-hdr-left"><span class="sec-num">8</span><h2 id="process">Process List &amp; Query Locks</h2></div>
         <button class="sec-toggle" id="btn-process">▲</button>
     </div>
     <div class="sec-body" id="body-process">
@@ -3831,7 +4310,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('perf-schema')">
-        <div class="sec-hdr-left"><span class="sec-num">8</span><h2 id="perf-schema">Performance Schema Insight</h2></div>
+        <div class="sec-hdr-left"><span class="sec-num">9</span><h2 id="perf-schema">Performance Schema Insight</h2></div>
         <button class="sec-toggle" id="btn-perf-schema">▲</button>
     </div>
     <div class="sec-body" id="body-perf-schema">
@@ -3953,7 +4432,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('user-details')">
-        <div class="sec-hdr-left"><span class="sec-num">9</span><h2 id="user-details">User Details</h2></div>
+        <div class="sec-hdr-left"><span class="sec-num">10</span><h2 id="user-details">User Details</h2></div>
         <button class="sec-toggle" id="btn-user-details">▼</button>
     </div>
     <div class="sec-body collapsed" id="body-user-details">
@@ -3991,7 +4470,7 @@ const htmlTemplate = `<!DOCTYPE html>
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('recommendations')">
-        <div class="sec-hdr-left"><span class="sec-num">10</span><h2 id="recommendations">Recommendations</h2></div>
+        <div class="sec-hdr-left"><span class="sec-num">11</span><h2 id="recommendations">Recommendations</h2></div>
         <button class="sec-toggle" id="btn-recommendations">▲</button>
     </div>
     <div class="sec-body" id="body-recommendations">
