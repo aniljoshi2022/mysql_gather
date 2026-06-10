@@ -6,4 +6,5 @@ mysql_gather_*
 
 # Ignore local environment or IDE configs
 .DS_Store
-
+.setting
+.vscode
