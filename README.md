@@ -58,11 +58,7 @@ chmod +x mysql_gather
 
 ## 📸 Screenshots
 
-
-|                     |                             |
-| ------------------- | --------------------------- |
-| **mysql_gather UI** | **HA/Replication Topology** |
-
+<img width="3004" height="1600" alt="image" src="https://github.com/user-attachments/assets/a28a2248-18c0-4e5c-91f5-86939ffcc8a5" />
 
 
 
