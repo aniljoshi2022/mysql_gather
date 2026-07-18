@@ -1,10 +1,11 @@
 # 🐬 MySQL Gather
 
-A Go-based tool to gather MySQL insight and performance metrics and output it  in an HTML report.
+A Go-based tool to gather MySQL insight and performance metrics and output it in an HTML report.
 
 ## ⌛️How to Run
 
 ### Option 1: Download Pre-compiled Binaries (Easiest)
+
 Go to the **Releases** tab, download the binary for your OS, and run it via terminal/command prompt:
 
 **Linux:** `./mysql_gather_linux-<ARCH> --user=<USER> --password=<PASSWORD> --host=<HOST> --port=<PORT>`
@@ -15,16 +16,14 @@ Go to the **Releases** tab, download the binary for your OS, and run it via term
 
 ### Option 2: Build from Source (Requires Go installed)
 
-
 ```bash
 git clone https://github.com/aniljoshi2022/mysql_gather.git
 cd mysql_gather
 go mod tidy
 go build -o mysql_gather main.go
 chmod +x mysql_gather
-./mysql_gather --user=<USER> --password=<PASSWORD> --host=<HOST> --port=<PORT>
+./mysql_gather --user=<USER> --password=<PASSWORD> --host=<HOST> --port=<PORT> --db=<database>
 ```
-
 
 To build this project from source, you need to have Go (Golang) installed on your machine.
 
@@ -36,45 +35,44 @@ To build this project from source, you need to have Go (Golang) installed on you
 Verify your installation by running `go version` in your terminal or command prompt.
 
 **Build the code**
+
 ```
 go build -o mysql_gather main.go
 ```
 
 **Make it executable (usually required on Linux/Mac)**
+
 ```
 chmod +x mysql_gather
 ```
 
 **Run the tool**
+
 ```
-./mysql_gather --user=root --password=Root@1234 --host=127.0.0.1 --port=3306
+./mysql_gather --user=root --password=Root@1234 --host=127.0.0.1 --port=3306 --db=test
 ```
 
 ---
+
+
+
 ## 📸 Screenshots
 
-<table>
-  <tr>
-    <td valign="top" width="50%">
-      <p align="center"><strong>mysql_gather UI</strong></p>
-      <a href="https://github.com/user-attachments/assets/69a1e627-91ba-4096-8669-a469e7cc845b">
-        <img src="https://github.com/user-attachments/assets/69a1e627-91ba-4096-8669-a469e7cc845b" alt="mysql_gather UI" width="100%"/>
-      </a>
-    </td>
-    <td valign="top" width="50%">
-      <p align="center"><strong>HA/Replication Topology</strong></p>
-      <a href="https://github.com/user-attachments/assets/fe4a99bd-3a72-4590-a383-e3f25453f461">
-        <img src="https://github.com/user-attachments/assets/fe4a99bd-3a72-4590-a383-e3f25453f461" alt="HA/Replication" width="100%"/>
-      </a>
-    </td>
-  </tr>
-</table>
+
+|                     |                             |
+| ------------------- | --------------------------- |
+| **mysql_gather UI** | **HA/Replication Topology** |
+
+
+
 
 ## **🔖Usage**
 
 ```bash
-./mysql_gather  --help
+./mysql_gather --help
 Usage of ./mysql_gather:
+  -db string
+    	Target database name for Tables & Indexes analysis (required)
   -host string
     	MySQL host address (default "127.0.0.1")
   -output string
@@ -86,3 +84,17 @@ Usage of ./mysql_gather:
   -user string
     	MySQL database user (default "root")
 ```
+
+
+
+## **🧑‍💻Monitoring Previleges required:**
+
+```bash
+CREATE USER '<USERNAME>'@localhost identified by '<PASSWORD>';
+GRANT PROCESS ON . TO <USERNAME>'@localhost;
+GRANT REPLICATION CLIENT ON . TO <USERNAME>'@localhost;
+GRANT SELECT ON performance_schema.* TO <USERNAME>'@localhost;
+GRANT SELECT ON sys.* TO <USERNAME>'@localhost;
+GRANT SELECT ON mysql.* TO <USERNAME>'@localhost;
+```
+
