@@ -44,25 +44,26 @@ func debugLog(hypothesisID, location, message string, data map[string]interface{
 
 // SummaryInfo holds basic server metadata, including mysqladmin status metrics
 type SummaryInfo struct {
-	Hostname           string
-	CollectedAt        string
-	ServerVersion      string
-	Uptime             string
-	UptimeSec          string
-	TxnIsolation       string
-	ReadOnly           string
-	ConnDetails        string
-	Host               string
-	Port               string
-	User               string
-	Threads            string
-	Questions          string
-	SlowQueries        string
-	Opens              string
-	FlushTables        string
-	OpenTables         string
-	QueriesPerSec      string
-	ClusterFlowControl string // Dynamic flow control indicator in top summary
+	Hostname                string
+	CollectedAt             string
+	ServerVersion           string
+	Uptime                  string
+	UptimeSec               string
+	TxnIsolation            string
+	ReadOnly                string
+	ConnDetails             string
+	Host                    string
+	Port                    string
+	User                    string
+	Threads                 string
+	Questions               string
+	SlowQueries             string
+	Opens                   string
+	FlushTables             string
+	OpenTables              string
+	QueriesPerSec           string
+	ClusterFlowControl      string // Dynamic flow control indicator in top summary
+	ClusterFlowControlColor string // CSS color for ClusterFlowControl display
 }
 
 // KeyVal represents basic two-column status or config metrics
@@ -337,6 +338,63 @@ type UserDetail struct {
 	Host            string
 	Plugin          string
 	PasswordExpired string
+}
+
+// TableNoPK holds tables that are missing a proper primary key
+type TableNoPK struct {
+	TableSchema string
+	TableName   string
+	TableRows   string
+}
+
+// UnusedIndex holds an index that has never been used since the last server restart
+type UnusedIndex struct {
+	ObjectSchema string
+	ObjectName   string
+	IndexName    string
+}
+
+// DuplicateIndex holds a redundant index that is covered by another index
+type DuplicateIndex struct {
+	TableSchema           string
+	TableName             string
+	RedundantIndexName    string
+	RedundantIndexColumns string
+}
+
+// DatabaseInfo holds size information for a single database schema
+type DatabaseInfo struct {
+	DatabaseName string
+	TotalSizeMB  string
+}
+
+// FragmentedTable holds fragmentation metrics for a single table
+type FragmentedTable struct {
+	TableName         string
+	Engine            string
+	DataLengthMB      string
+	IndexLengthMB     string
+	FragmentedSpaceMB string
+	FragmentationPct  string
+}
+
+type InnodbTableStat struct {
+	DatabaseName         string
+	TableName            string
+	LastUpdate           string
+	NRows                string
+	ClusteredIndexSize   string
+	SumOfOtherIndexSizes string
+}
+
+type InnodbIndexStat struct {
+	DatabaseName string
+	TableName    string
+	IndexName    string
+	LastUpdate   string
+	StatName     string
+	StatValue    string
+	SampleSize   string
 }
 
 // Recommendation holds an automated advice item based on current configurations or statuses
@@ -649,6 +707,8 @@ type PageData struct {
 	StatusCounters       []KeyVal
 	SemiSyncDetails      []KeyVal
 	Processes            []ProcessInfo
+	ProcessListColumns   []string
+	ProcessListRows      [][]string
 	GroupMembers         []GroupMember
 	ReplicationStates    []ReplicationStatus
 	GRQueues             []GRMemberStats
@@ -688,6 +748,14 @@ type PageData struct {
 	InnodbTrx            []InnodbTrx
 	PfsThreads           []PfsThread
 	UserDetails          []UserDetail
+	DatabaseInfos        []DatabaseInfo
+	TablesNoPK           []TableNoPK
+	UnusedIndexes        []UnusedIndex
+	DuplicateIndexes     []DuplicateIndex
+	FragmentedTables     []FragmentedTable
+	InnodbTableStats     []InnodbTableStat
+	InnodbIndexStats     []InnodbIndexStat
+	TargetDB             string
 	Recommendations      []Recommendation
 }
 
@@ -1257,6 +1325,7 @@ func main() {
 	password := flag.String("password", "", "MySQL database password")
 	host := flag.String("host", "127.0.0.1", "MySQL host address")
 	port := flag.Int("port", 3306, "MySQL host port")
+	dbName := flag.String("db", "", "Target database name for Tables & Indexes analysis (required)")
 	output := flag.String("output", "mysql_gather.html", "Path to write the standalone HTML report")
 	flag.Parse()
 
@@ -1291,7 +1360,12 @@ func main() {
 
 	_ = db.QueryRow("SELECT @@hostname;").Scan(&data.Summary.Hostname)
 	_ = db.QueryRow("SELECT VERSION();").Scan(&data.Summary.ServerVersion)
-	_ = db.QueryRow("SELECT @@transaction_isolation;").Scan(&data.Summary.TxnIsolation)
+	// transaction isolation variable name differs: MySQL uses @@transaction_isolation,
+	// MariaDB historically exposes @@tx_isolation. Try both.
+	if err := db.QueryRow("SELECT @@transaction_isolation;").Scan(&data.Summary.TxnIsolation); err != nil || data.Summary.TxnIsolation == "" {
+		_ = db.QueryRow("SELECT @@tx_isolation;").Scan(&data.Summary.TxnIsolation)
+	}
+	data.TargetDB = *dbName
 
 	isMariaDB := strings.Contains(strings.ToLower(data.Summary.ServerVersion), "mariadb")
 
@@ -1426,7 +1500,20 @@ func main() {
 	data.Summary.Questions = statusMap["questions"]
 	data.Summary.SlowQueries = statusMap["slow_queries"]
 	data.Summary.Opens = statusMap["opened_tables"]
-	data.Summary.FlushTables = statusMap["flush_commands"]
+	// Flush commands counter may differ by server; try common keys and a direct lookup as fallback
+	ft := statusMap["flush_commands"]
+	if ft == "" {
+		ft = statusMap["flush_tables"]
+	}
+	if ft == "" {
+		// try direct lookup in performance_schema.global_status for common variants
+		var ftQ sql.NullString
+		_ = db.QueryRow("SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('Flush_commands','flush_commands','Flush_tables','flush_tables') LIMIT 1").Scan(&ftQ)
+		if ftQ.Valid {
+			ft = ftQ.String
+		}
+	}
+	data.Summary.FlushTables = ft
 	data.Summary.OpenTables = statusMap["open_tables"]
 	if uptimeSeconds > 0 && data.Summary.Questions != "" {
 		qCount, _ := strconv.ParseFloat(data.Summary.Questions, 64)
@@ -1833,8 +1920,15 @@ func main() {
 	// Final Summary Cluster Flow Control assignment
 	if !isClusterConfigured {
 		data.Summary.ClusterFlowControl = "Not Configured / Single Instance"
+		data.Summary.ClusterFlowControlColor = "#744210"
 	} else {
 		data.Summary.ClusterFlowControl = clusterFCStatus
+		// choose color based on status (handle variants like "Inactive (Galera Cluster Healthy)")
+		if strings.HasPrefix(strings.ToLower(clusterFCStatus), "inactive") {
+			data.Summary.ClusterFlowControlColor = "#22543d"
+		} else {
+			data.Summary.ClusterFlowControlColor = "#c53030"
+		}
 	}
 	// #region agent log
 	debugLog("D", "main.go:cluster-fc", "cluster flow control summary resolved", map[string]interface{}{
@@ -2142,29 +2236,86 @@ print(JSON.stringify(out));
 
 	// Section 7: Process List - SHOW FULL PROCESSLIST details
 	if rows, err := db.Query("SHOW FULL PROCESSLIST;"); err == nil {
+		cols, _ := rows.Columns()
+		// expose raw columns/rows so any server-specific extra columns render
+		data.ProcessListColumns = cols
+
+		colIndex := map[string]int{}
+		for i, c := range cols {
+			colIndex[strings.ToLower(c)] = i
+		}
+
 		for rows.Next() {
+			// read raw bytes for all columns
+			rawVals := make([]sql.RawBytes, len(cols))
+			scanArgs := make([]interface{}, len(cols))
+			for i := range rawVals {
+				scanArgs[i] = &rawVals[i]
+			}
+
+			if err := rows.Scan(scanArgs...); err != nil {
+				continue
+			}
+
+			// build string row for dynamic table rendering
+			rowStrs := make([]string, len(cols))
+			for i, rb := range rawVals {
+				if rb == nil {
+					rowStrs[i] = "NULL"
+				} else {
+					rowStrs[i] = string(rb)
+				}
+			}
+			data.ProcessListRows = append(data.ProcessListRows, rowStrs)
+
+			// also populate the typed ProcessInfo for compatibility with existing template
 			var p ProcessInfo
-			var dbVal sql.NullString
-			var infoVal sql.NullString
-			var stateVal sql.NullString
-			if err := rows.Scan(&p.ID, &p.User, &p.Host, &dbVal, &p.Command, &p.Time, &stateVal, &infoVal); err == nil {
-				if dbVal.Valid {
-					p.DB = dbVal.String
+			// id
+			if idx, ok := colIndex["id"]; ok && rowStrs[idx] != "" {
+				p.ID = rowStrs[idx]
+			} else if idx, ok := colIndex["thread_id"]; ok && rowStrs[idx] != "" {
+				p.ID = rowStrs[idx]
+			}
+			// user
+			if idx, ok := colIndex["user"]; ok {
+				p.User = rowStrs[idx]
+			}
+			// host
+			if idx, ok := colIndex["host"]; ok {
+				p.Host = rowStrs[idx]
+			}
+			// db
+			if idx, ok := colIndex["db"]; ok {
+				if rowStrs[idx] != "" {
+					p.DB = rowStrs[idx]
 				} else {
 					p.DB = "NULL"
 				}
-				if stateVal.Valid {
-					p.State = stateVal.String
-				} else {
-					p.State = ""
-				}
-				if infoVal.Valid {
-					p.Info = infoVal.String
+			}
+			// command
+			if idx, ok := colIndex["command"]; ok {
+				p.Command = rowStrs[idx]
+			}
+			// time (some variants have TIME_MS or TIME)
+			if idx, ok := colIndex["time_ms"]; ok {
+				p.Time = rowStrs[idx]
+			} else if idx, ok := colIndex["time"]; ok {
+				p.Time = rowStrs[idx]
+			}
+			// state
+			if idx, ok := colIndex["state"]; ok {
+				p.State = rowStrs[idx]
+			}
+			// info
+			if idx, ok := colIndex["info"]; ok {
+				if rowStrs[idx] != "" {
+					p.Info = rowStrs[idx]
 				} else {
 					p.Info = "NULL"
 				}
-				data.Processes = append(data.Processes, p)
 			}
+
+			data.Processes = append(data.Processes, p)
 		}
 		rows.Close()
 	}
@@ -2373,18 +2524,192 @@ print(JSON.stringify(out));
 		rows.Close()
 	}
 
-	// Section 8: Performance Schema profiling details
-	// 8a. Global memory event allocations
-	memQuery := "SELECT event_name, current_alloc FROM sys.memory_global_by_current_bytes LIMIT 10;"
-	if rows, err := db.Query(memQuery); err == nil {
+	// Section 11: Databases Info — size of every schema (no --db filter needed)
+	dbInfoQuery := `
+		SELECT
+		    TABLE_SCHEMA AS database_name,
+		    ROUND(SUM(DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) AS total_size_mb
+		FROM information_schema.TABLES
+		GROUP BY TABLE_SCHEMA
+		ORDER BY SUM(DATA_LENGTH + INDEX_LENGTH) DESC`
+	if rows, err := db.Query(dbInfoQuery); err == nil {
 		for rows.Next() {
-			var m MemoryEvent
-			if err := rows.Scan(&m.EventName, &m.CurrentAlloc); err == nil {
-				m.CurrentAlloc = formatBytes(m.CurrentAlloc)
-				data.MemoryEvents = append(data.MemoryEvents, m)
+			var d DatabaseInfo
+			if err := rows.Scan(&d.DatabaseName, &d.TotalSizeMB); err == nil {
+				data.DatabaseInfos = append(data.DatabaseInfos, d)
 			}
 		}
 		rows.Close()
+	} else {
+		log.Printf("[Databases Info] query error: %v", err)
+	}
+
+	// Section 12: Tables & Indexes analysis (scoped to --db flag)
+	if *dbName != "" {
+		// 12a. Tables missing a proper primary key
+		noPKQuery := `
+			SELECT a.TABLE_SCHEMA, a.TABLE_NAME,
+			       IFNULL(CAST(a.TABLE_ROWS AS CHAR), '0') AS TABLE_ROWS
+			FROM information_schema.tables a
+			LEFT JOIN (
+				SELECT TABLE_SCHEMA, TABLE_NAME
+				FROM information_schema.statistics
+				GROUP BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
+				HAVING SUM(CASE WHEN non_unique = 0 AND nullable != 'YES' THEN 1 ELSE 0 END) = COUNT(*)
+			) b ON a.TABLE_SCHEMA = b.TABLE_SCHEMA AND a.TABLE_NAME = b.TABLE_NAME
+			WHERE b.TABLE_NAME IS NULL
+			  AND a.TABLE_TYPE = 'BASE TABLE'
+			  AND a.TABLE_SCHEMA = ?
+			ORDER BY a.TABLE_ROWS DESC
+			LIMIT 10`
+		if rows, err := db.Query(noPKQuery, *dbName); err == nil {
+			for rows.Next() {
+				var t TableNoPK
+				if err := rows.Scan(&t.TableSchema, &t.TableName, &t.TableRows); err == nil {
+					data.TablesNoPK = append(data.TablesNoPK, t)
+				}
+			}
+			rows.Close()
+		} else {
+			log.Printf("[Tables & Indexes] tables-without-PK query error: %v", err)
+		}
+
+		// 12b. Unused indexes
+		unusedQuery := `SELECT object_schema, object_name, index_name
+			FROM sys.schema_unused_indexes
+			WHERE object_schema = ?`
+		if rows, err := db.Query(unusedQuery, *dbName); err == nil {
+			for rows.Next() {
+				var u UnusedIndex
+				if err := rows.Scan(&u.ObjectSchema, &u.ObjectName, &u.IndexName); err == nil {
+					data.UnusedIndexes = append(data.UnusedIndexes, u)
+				}
+			}
+			rows.Close()
+		} else {
+			log.Printf("[Tables & Indexes] unused-indexes query error: %v", err)
+		}
+
+		// 12c. Duplicate / redundant indexes
+		dupQuery := `SELECT table_schema, table_name, redundant_index_name, redundant_index_columns
+			FROM sys.schema_redundant_indexes
+			WHERE table_schema = ?`
+		if rows, err := db.Query(dupQuery, *dbName); err == nil {
+			for rows.Next() {
+				var d DuplicateIndex
+				if err := rows.Scan(&d.TableSchema, &d.TableName, &d.RedundantIndexName, &d.RedundantIndexColumns); err == nil {
+					data.DuplicateIndexes = append(data.DuplicateIndexes, d)
+				}
+			}
+			rows.Close()
+		} else {
+			log.Printf("[Tables & Indexes] duplicate-indexes query error: %v", err)
+		}
+
+		// 12d. Fragmented tables
+		fragQuery := `
+			SELECT
+			    TABLE_NAME,
+			    ENGINE,
+			    ROUND(DATA_LENGTH / 1024 / 1024, 2)   AS data_length_mb,
+			    ROUND(INDEX_LENGTH / 1024 / 1024, 2)  AS index_length_mb,
+			    ROUND(DATA_FREE / 1024 / 1024, 2)     AS fragmented_space_mb,
+			    ROUND((DATA_FREE / (DATA_LENGTH + INDEX_LENGTH + DATA_FREE)) * 100, 2) AS fragmentation_pct
+			FROM information_schema.TABLES
+			WHERE TABLE_SCHEMA = ?
+			ORDER BY DATA_FREE DESC`
+		if rows, err := db.Query(fragQuery, *dbName); err == nil {
+			for rows.Next() {
+				var f FragmentedTable
+				if err := rows.Scan(&f.TableName, &f.Engine, &f.DataLengthMB, &f.IndexLengthMB, &f.FragmentedSpaceMB, &f.FragmentationPct); err == nil {
+					data.FragmentedTables = append(data.FragmentedTables, f)
+				}
+			}
+			rows.Close()
+		} else {
+			log.Printf("[Tables & Indexes] fragmented-tables query error: %v", err)
+		}
+
+		// 12e. Table / Index stats for selected database
+		tableStatsQuery := `
+			SELECT database_name, table_name, last_update,
+			       COALESCE(CAST(n_rows AS CHAR), '0') AS n_rows,
+			       COALESCE(CAST(clustered_index_size AS CHAR), '0') AS clustered_index_size,
+			       COALESCE(CAST(sum_of_other_index_sizes AS CHAR), '0') AS sum_of_other_index_sizes
+			FROM mysql.innodb_table_stats
+			WHERE database_name = ?
+			ORDER BY table_name`
+		if rows, err := db.Query(tableStatsQuery, *dbName); err == nil {
+			for rows.Next() {
+				var t InnodbTableStat
+				if err := rows.Scan(&t.DatabaseName, &t.TableName, &t.LastUpdate, &t.NRows, &t.ClusteredIndexSize, &t.SumOfOtherIndexSizes); err == nil {
+					data.InnodbTableStats = append(data.InnodbTableStats, t)
+				}
+			}
+			rows.Close()
+		} else {
+			log.Printf("[Tables & Indexes] innodb-table-stats query error: %v", err)
+		}
+
+		indexStatsQuery := `
+			SELECT database_name, table_name, index_name, last_update, stat_name, stat_value, sample_size
+			FROM mysql.innodb_index_stats
+			WHERE database_name = ?
+			ORDER BY table_name, index_name, stat_name`
+		if rows, err := db.Query(indexStatsQuery, *dbName); err == nil {
+			for rows.Next() {
+				var i InnodbIndexStat
+				if err := rows.Scan(&i.DatabaseName, &i.TableName, &i.IndexName, &i.LastUpdate, &i.StatName, &i.StatValue, &i.SampleSize); err == nil {
+					data.InnodbIndexStats = append(data.InnodbIndexStats, i)
+				}
+			}
+			rows.Close()
+		} else {
+			log.Printf("[Tables & Indexes] innodb-index-stats query error: %v", err)
+		}
+	}
+
+	// Section 8: Performance Schema profiling details
+	// 8a. Global memory event allocations
+	memQuery := "SELECT event_name, current_alloc FROM sys.memory_global_by_current_bytes LIMIT 10;"
+	gotMem := false
+	if rows, err := db.Query(memQuery); err == nil {
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			raw := make([]sql.RawBytes, len(cols))
+			scanArgs := make([]interface{}, len(cols))
+			for i := range raw {
+				scanArgs[i] = &raw[i]
+			}
+			if err := rows.Scan(scanArgs...); err == nil {
+				var m MemoryEvent
+				if len(raw) > 0 && raw[0] != nil {
+					m.EventName = string(raw[0])
+				}
+				if len(raw) > 1 && raw[1] != nil {
+					m.CurrentAlloc = string(raw[1])
+				}
+				m.CurrentAlloc = formatBytes(m.CurrentAlloc)
+				data.MemoryEvents = append(data.MemoryEvents, m)
+				gotMem = true
+			}
+		}
+		rows.Close()
+	}
+	// fallback: some MariaDB variants may require explicit casting
+	if !gotMem {
+		memQuery2 := "SELECT CAST(event_name AS CHAR), CAST(current_alloc AS CHAR) FROM sys.memory_global_by_current_bytes LIMIT 10;"
+		if rows, err := db.Query(memQuery2); err == nil {
+			for rows.Next() {
+				var m MemoryEvent
+				if err := rows.Scan(&m.EventName, &m.CurrentAlloc); err == nil {
+					m.CurrentAlloc = formatBytes(m.CurrentAlloc)
+					data.MemoryEvents = append(data.MemoryEvents, m)
+					gotMem = true
+				}
+			}
+			rows.Close()
+		}
 	}
 
 	// 8b. Global Wait thread event summary
@@ -2605,6 +2930,25 @@ print(JSON.stringify(out));
 		}
 	}
 
+	// Rule 9b: PXC/Galera Minimum Cluster Size Check
+	if data.GaleraSummary.ClusterSize != "" {
+		clusterSizeN, _ := strconv.Atoi(strings.TrimSpace(data.GaleraSummary.ClusterSize))
+		if clusterSizeN > 0 && clusterSizeN < 3 {
+			data.Recommendations = append(data.Recommendations, Recommendation{
+				Type:      "WARNING",
+				Parameter: "wsrep_cluster_size",
+				Description: "Running fewer than 3 PXC/Galera nodes is not recommended for production deployments. " +
+					"A minimum of 3 nodes is recommended, and clusters should ideally have an odd number of nodes (3, 5, 7, and so on) " +
+					"to simplify quorum decisions and avoid split-brain scenarios. " +
+					"\n\n" +
+					"A Galera cluster requires more than 50% of its members to remain online to maintain quorum and continue accepting writes. " +
+					"If deploying three data-bearing nodes is not feasible, consider adding a Galera Arbitrator (garbd). " +
+					"Although it does not store data, garbd participates in quorum voting, providing the required majority while consuming " +
+					"significantly fewer resources than a full database node.",
+			})
+		}
+	}
+
 	// Rule 10: PXC — wsrep_local_recv_queue_max vs gcs.fc_limit comparison
 	// If recv_queue_max >= fc_limit, the node has already hit the flow-control ceiling.
 	// Also recommend enabling gcs.fc_master_slave / gcs.fc_single_primary when writes
@@ -2781,11 +3125,12 @@ const htmlTemplate = `<!DOCTYPE html>
         .top-bar {
             background: linear-gradient(135deg, #1a365d 0%, #2b6cb0 100%);
             color: #fff;
-            padding: 0 28px;
+            padding: 12px 28px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            height: 54px;
+            height: auto;
+            min-height: 65px;
             position: sticky;
             top: 0;
             z-index: 100;
@@ -2794,65 +3139,99 @@ const htmlTemplate = `<!DOCTYPE html>
         .top-bar-brand {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
         }
         .top-bar-logo {
-            font-size: 22px;
+            font-size: 28px;
             line-height: 1;
+            font-weight: 700;
+            text-shadow: 0 2px 4px rgba(0,0,0,.2);
         }
         .top-bar-title {
-            font-size: 16px;
+            font-size: 20px;
             font-weight: 700;
             letter-spacing: .5px;
             font-family: Menlo, "Courier New", monospace;
         }
         .top-bar-sub {
-            font-size: 11px;
-            opacity: .75;
-            margin-left: 4px;
+            font-size: 12px;
+            opacity: .8;
+            margin-left: 6px;
             font-weight: 400;
         }
         .top-bar-meta {
-            font-size: 11px;
-            opacity: .85;
+            font-size: 12px;
+            opacity: .9;
             text-align: right;
-            line-height: 1.6;
+            line-height: 1.7;
         }
 
         /* ── Section Nav Pills ────────────────────────────────── */
-        .sec-nav {
-            background: #fff;
-            border-bottom: 1px solid #cbd5e0;
-            padding: 0 28px;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 2px 0;
-            align-items: center;
-            position: sticky;
-            top: 54px;
-            z-index: 99;
-            box-shadow: 0 1px 4px rgba(0,0,0,.06);
-        }
-        .sec-nav a {
-            display: inline-block;
-            padding: 8px 12px;
-            font-size: 11px;
-            font-weight: 600;
-            color: #4a5568;
-            text-decoration: none;
-            border-bottom: 3px solid transparent;
-            white-space: nowrap;
-            transition: color .15s, border-color .15s;
-        }
-        .sec-nav a:hover {
-            color: #2b6cb0;
-            border-bottom-color: #2b6cb0;
-        }
-        .sec-nav-sep {
-            color: #cbd5e0;
-            padding: 0 2px;
-            font-size: 11px;
-        }
+		.sec-nav {
+			background: #ffffff;
+			border-bottom: 1px solid #e9f1f9;
+			padding: 6px 24px;
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px 12px;
+			align-items: center;
+			position: sticky;
+			top: 65px;
+			z-index: 99;
+			box-shadow: 0 1px 4px rgba(2,6,23,0.02);
+		}
+		.sec-nav a {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 7px 12px;
+			font-size: 13px;
+			font-weight: 600;
+			color: #34495e;
+			text-decoration: none;
+			border-radius: 6px;
+			background: transparent;
+			white-space: nowrap;
+			transition: color .14s ease, background .14s ease, box-shadow .14s ease;
+			letter-spacing: 0.3px;
+			position: relative;
+		}
+		.sec-nav a::before {
+			content: attr(data-icon);
+			font-size: 16px;
+			display: inline-block;
+			opacity: 0.85;
+			transition: opacity .14s ease, transform .14s ease;
+		}
+		.sec-nav a:hover {
+			color: #15324a;
+			background: rgba(43,108,176,0.04);
+			box-shadow: 0 6px 12px rgba(43,108,176,0.04);
+		}
+		.sec-nav a:hover::before {
+			opacity: 1;
+			transform: scale(1.1);
+		}
+		.sec-nav a.active {
+			color: #1a365d;
+			background: transparent;
+			font-weight: 700;
+		}
+		.sec-nav a.active::before {
+			opacity: 1;
+		}
+		.sec-nav a.active::after {
+			content: '';
+			position: absolute;
+			left: 8px;
+			right: 8px;
+			bottom: -10px;
+			height: 3px;
+			background: linear-gradient(90deg,#2b6cb0,#1e5a96);
+			border-radius: 3px;
+			box-shadow: 0 6px 12px rgba(30,90,150,0.09);
+		}
+		.sec-nav-sep { display: none; }
 
         /* ── Main Content Area ────────────────────────────────── */
         .content {
@@ -3058,17 +3437,19 @@ const htmlTemplate = `<!DOCTYPE html>
 
     <!-- ── Section Nav ── -->
     <div class="sec-nav">
-        <a href="#summary">System Summary</a><span class="sec-nav-sep">·</span>
-        <a href="#config">Configuration Variables</a><span class="sec-nav-sep">·</span>
-        <a href="#status">Status Variables</a><span class="sec-nav-sep">·</span>
-        <a href="#innodb">InnoDB Monitor Stats</a><span class="sec-nav-sep">·</span>
-        <a href="#mutexes">Mutexes / Semaphores</a><span class="sec-nav-sep">·</span>
-        <a href="#replication">HA &amp; Replication</a><span class="sec-nav-sep">·</span>
-        <a href="#replica-source">Binary Log Status</a><span class="sec-nav-sep">·</span>
-        <a href="#process">Process List &amp; Query Locks </a><span class="sec-nav-sep">·</span>
-        <a href="#perf-schema">Performance Schema Insight</a><span class="sec-nav-sep">·</span>
-        <a href="#user-details">User Details</a><span class="sec-nav-sep">·</span>
-        <a href="#recommendations">Recommendations</a>
+        <a href="#summary" data-icon="▶️">Summary</a><span class="sec-nav-sep">·</span>
+        <a href="#config" data-icon="⚙️">Config</a><span class="sec-nav-sep">·</span>
+        <a href="#status" data-icon="◆">Status</a><span class="sec-nav-sep">·</span>
+        <a href="#innodb" data-icon="✦">InnoDB</a><span class="sec-nav-sep">·</span>
+        <a href="#mutexes" data-icon="◈">Mutexes</a><span class="sec-nav-sep">·</span>
+        <a href="#replication" data-icon="⊲">Replication</a><span class="sec-nav-sep">·</span>
+        <a href="#replica-source" data-icon="⬜">Binlog</a><span class="sec-nav-sep">·</span>
+        <a href="#process" data-icon="⧗">Process</a><span class="sec-nav-sep">·</span>
+        <a href="#perf-schema" data-icon="○">Perf</a><span class="sec-nav-sep">·</span>
+        <a href="#user-details" data-icon="◎">Users</a><span class="sec-nav-sep">·</span>
+        <a href="#databases-info" data-icon="◉">Databases</a><span class="sec-nav-sep">·</span>
+        <a href="#tables-indexes" data-icon="●">Tables</a><span class="sec-nav-sep">·</span>
+        <a href="#recommendations" data-icon="★">Recommendations</a>
     </div>
 
     <div class="content">
@@ -3107,10 +3488,10 @@ const htmlTemplate = `<!DOCTYPE html>
             <td>{{.Summary.TxnIsolation}}</td>
         </tr>
         <tr>
-            <th>Read Only status</th>
-            <td><strong>{{.Summary.ReadOnly}}</strong></td>
-            <th>Cluster Flow Control Status</th>
-            <td><strong style="{{if eq .Summary.ClusterFlowControl "Inactive (Healthy)"}}color: #22543d{{else if eq .Summary.ClusterFlowControl "Not Configured / Single Instance"}}color: #744210{{else}}color: #c53030{{end}}">{{.Summary.ClusterFlowControl}}</strong></td>
+			<th>Read Only status</th>
+			<td><strong>{{.Summary.ReadOnly}}</strong></td>
+			<th>Cluster Flow Control Status</th>
+			<td><strong style="color: {{if .Summary.ClusterFlowControlColor}}{{.Summary.ClusterFlowControlColor}}{{else}}#c53030{{end}}">{{.Summary.ClusterFlowControl}}</strong></td>
         </tr>
         <tr>
             <th>Threads Connected</th>
@@ -3118,12 +3499,16 @@ const htmlTemplate = `<!DOCTYPE html>
             <th>Total Questions</th>
             <td>{{.Summary.Questions}}</td>
         </tr>
-        <tr>
-            <th>Slow Queries</th>
-            <td><strong style="color: #900;">{{.Summary.SlowQueries}}</strong></td>
-            <th>Opens</th>
-            <td>{{.Summary.Opens}}</td>
-        </tr>
+		<tr>
+			<th>Slow Queries</th>
+			{{if eq .Summary.SlowQueries "0"}}
+			<td>{{.Summary.SlowQueries}}</td>
+			{{else}}
+			<td><strong style="color: #900;">{{.Summary.SlowQueries}}</strong></td>
+			{{end}}
+			<th>Opens</th>
+			<td>{{.Summary.Opens}}</td>
+		</tr>
         <tr>
             <th>Flush Tables</th>
             <td>{{.Summary.FlushTables}}</td>
@@ -4088,36 +4473,55 @@ const htmlTemplate = `<!DOCTYPE html>
     <div class="sec-body" id="body-process">
     
     <h3>Active Connections Thread Status</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>User</th>
-                <th>Host IP Address</th>
-                <th>DB</th>
-                <th>Command</th>
-                <th>Time (s)</th>
-                <th>State</th>
-                <th>Executing Statement Info</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range .Processes}}
-            <tr>
-                <td>{{.ID}}</td>
-                <td><strong>{{.User}}</strong></td>
-                <td>{{.Host}}</td>
-                <td>{{.DB}}</td>
-                <td>{{.Command}}</td>
-                <td class="text-right"><strong>{{.Time}}</strong></td>
-                <td>{{.State}}</td>
-                <td><small>{{.Info}}</small></td>
-            </tr>
-            {{else}}
-            <tr><td colspan="8">No active user connection threads detected.</td></tr>
-            {{end}}
-        </tbody>
-    </table>
+	{{if .ProcessListColumns}}
+	<table>
+		<thead>
+			<tr>
+				{{range .ProcessListColumns}}<th>{{.}}</th>{{end}}
+			</tr>
+		</thead>
+		<tbody>
+			{{range .ProcessListRows}}
+			<tr>
+				{{range .}}<td>{{.}}</td>{{end}}
+			</tr>
+			{{else}}
+			<tr><td colspan="{{len .ProcessListColumns}}">No active user connection threads detected.</td></tr>
+			{{end}}
+		</tbody>
+	</table>
+	{{else}}
+	<table>
+		<thead>
+			<tr>
+				<th>ID</th>
+				<th>User</th>
+				<th>Host IP Address</th>
+				<th>DB</th>
+				<th>Command</th>
+				<th>Time (s)</th>
+				<th>State</th>
+				<th>Executing Statement Info</th>
+			</tr>
+		</thead>
+		<tbody>
+			{{range .Processes}}
+			<tr>
+				<td>{{.ID}}</td>
+				<td><strong>{{.User}}</strong></td>
+				<td>{{.Host}}</td>
+				<td>{{.DB}}</td>
+				<td>{{.Command}}</td>
+				<td class="text-right"><strong>{{.Time}}</strong></td>
+				<td>{{.State}}</td>
+				<td><small>{{.Info}}</small></td>
+			</tr>
+			{{else}}
+			<tr><td colspan="8">No active user connection threads detected.</td></tr>
+			{{end}}
+		</tbody>
+	</table>
+	{{end}}
 
     <h3>Historical Statement Summary Digests</h3>
     <table>
@@ -4465,12 +4869,216 @@ const htmlTemplate = `<!DOCTYPE html>
         </tbody>
     </table>
 
-    <!-- 10. Recommendations -->
+    <!-- 11. Databases Info -->
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('databases-info')">
+        <div class="sec-hdr-left"><span class="sec-num">11</span><h2 id="databases-info">Databases Info</h2></div>
+        <button class="sec-toggle" id="btn-databases-info">▼</button>
+    </div>
+    <div class="sec-body collapsed" id="body-databases-info">
+
+    <h3>Database Sizes</h3>
+    <table style="max-width: 500px;">
+        <thead>
+            <tr>
+                <th>Database Name</th>
+                <th class="text-right">Total Size (MB)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .DatabaseInfos}}
+            <tr>
+                <td><code>{{.DatabaseName}}</code></td>
+                <td class="text-right">{{.TotalSizeMB}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2">No database size information available.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <!-- 12. Tables & Indexes -->
+    </div><!-- end sec-body -->
+    </div></div><!-- end sec-body/sec-card -->
+    <div class="sec-card">
+    <div class="sec-hdr" onclick="toggleSec('tables-indexes')">
+        <div class="sec-hdr-left"><span class="sec-num">12</span><h2 id="tables-indexes">Tables &amp; Indexes{{if .TargetDB}} — <code>{{.TargetDB}}</code>{{end}}</h2></div>
+        <button class="sec-toggle" id="btn-tables-indexes">▼</button>
+    </div>
+    <div class="sec-body collapsed" id="body-tables-indexes">
+
+    {{if eq .TargetDB ""}}
+    <p><em>No database specified. Re-run with <code>--db=&lt;database_name&gt;</code> to enable Tables &amp; Indexes analysis.</em></p>
+    {{else}}
+
+    <h3>Tables Without Primary Keys</h3>
+    <table style="max-width: 700px;">
+        <thead>
+            <tr>
+                <th>Schema</th>
+                <th>Table Name</th>
+                <th>Row Count (est.)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .TablesNoPK}}
+            <tr>
+                <td><code>{{.TableSchema}}</code></td>
+                <td><strong>{{.TableName}}</strong></td>
+                <td class="text-right">{{.TableRows}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="3">No tables without a primary key found in <code>{{$.TargetDB}}</code>.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>Unused Indexes</h3>
+    <table style="max-width: 700px;">
+        <thead>
+            <tr>
+                <th>Schema</th>
+                <th>Table Name</th>
+                <th>Index Name</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .UnusedIndexes}}
+            <tr>
+                <td><code>{{.ObjectSchema}}</code></td>
+                <td><strong>{{.ObjectName}}</strong></td>
+                <td><code>{{.IndexName}}</code></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="3">No unused indexes found in <code>{{$.TargetDB}}</code>.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>Duplicate / Redundant Indexes</h3>
+    <table style="max-width: 850px;">
+        <thead>
+            <tr>
+                <th>Schema</th>
+                <th>Table Name</th>
+                <th>Redundant Index</th>
+                <th>Redundant Columns</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .DuplicateIndexes}}
+            <tr>
+                <td><code>{{.TableSchema}}</code></td>
+                <td><strong>{{.TableName}}</strong></td>
+                <td><code>{{.RedundantIndexName}}</code></td>
+                <td><code>{{.RedundantIndexColumns}}</code></td>
+            </tr>
+            {{else}}
+            <tr><td colspan="4">No redundant indexes found in <code>{{$.TargetDB}}</code>.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>Fragmented Tables</h3>
+    <table style="max-width: 950px;">
+        <thead>
+            <tr>
+                <th>Table Name</th>
+                <th>Engine</th>
+                <th class="text-right">Data (MB)</th>
+                <th class="text-right">Index (MB)</th>
+                <th class="text-right">Free Space (MB)</th>
+                <th class="text-right">Fragmentation %</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .FragmentedTables}}
+            <tr>
+                <td><strong>{{.TableName}}</strong></td>
+                <td>{{.Engine}}</td>
+                <td class="text-right">{{.DataLengthMB}}</td>
+                <td class="text-right">{{.IndexLengthMB}}</td>
+                <td class="text-right">{{.FragmentedSpaceMB}}</td>
+                <td class="text-right">
+                    {{.FragmentationPct}}%
+                </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="6">No fragmentation data found in <code>{{$.TargetDB}}</code>.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h3>Table / Index Stats Highlight</h3>
+
+    <h4>InnoDB Table Stats</h4>
+    <table style="max-width: 1000px;">
+        <thead>
+            <tr>
+                <th>Database</th>
+                <th>Table</th>
+                <th>Last Update</th>
+                <th class="text-right">Rows</th>
+                <th class="text-right">Clustered Index Size</th>
+                <th class="text-right">Other Index Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .InnodbTableStats}}
+            <tr>
+                <td><code>{{.DatabaseName}}</code></td>
+                <td><strong>{{.TableName}}</strong></td>
+                <td>{{.LastUpdate}}</td>
+                <td class="text-right">{{.NRows}}</td>
+                <td class="text-right">{{.ClusteredIndexSize}}</td>
+                <td class="text-right">{{.SumOfOtherIndexSizes}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="6">No InnoDB table stats found for <code>{{$.TargetDB}}</code>.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    <h4>InnoDB Index Stats</h4>
+    <table style="max-width: 1000px;">
+        <thead>
+            <tr>
+                <th>Database</th>
+                <th>Table</th>
+                <th>Index</th>
+                <th>Last Update</th>
+                <th>Stat Name</th>
+                <th class="text-right">Value</th>
+                <th class="text-right">Sample Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .InnodbIndexStats}}
+            <tr>
+                <td><code>{{.DatabaseName}}</code></td>
+                <td><strong>{{.TableName}}</strong></td>
+                <td><code>{{.IndexName}}</code></td>
+                <td>{{.LastUpdate}}</td>
+                <td>{{.StatName}}</td>
+                <td class="text-right">{{.StatValue}}</td>
+                <td class="text-right">{{.SampleSize}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7">No InnoDB index stats found for <code>{{$.TargetDB}}</code>.</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+
+    {{end}}
+
+    <!-- 13. Recommendations -->
     </div><!-- end sec-body -->
     </div></div><!-- end sec-body/sec-card -->
     <div class="sec-card">
     <div class="sec-hdr" onclick="toggleSec('recommendations')">
-        <div class="sec-hdr-left"><span class="sec-num">11</span><h2 id="recommendations">Recommendations</h2></div>
+        <div class="sec-hdr-left"><span class="sec-num">13</span><h2 id="recommendations">Recommendations</h2></div>
         <button class="sec-toggle" id="btn-recommendations">▲</button>
     </div>
     <div class="sec-body" id="body-recommendations">
@@ -4531,6 +5139,31 @@ function toggleSec(id) {
         btn.textContent = '▼';
     }
 }
+
+// Track active section based on scroll position
+function updateActiveNav() {
+    const sections = document.querySelectorAll('[id^="summary"], [id^="config"], [id^="status"], [id^="innodb"], [id^="mutexes"], [id^="replication"], [id^="replica-source"], [id^="process"], [id^="perf-schema"], [id^="user-details"], [id^="databases-info"], [id^="tables-indexes"], [id^="recommendations"]');
+    const navLinks = document.querySelectorAll('.sec-nav a');
+    
+    let currentId = null;
+    sections.forEach(section => {
+        if (section.id && section.getBoundingClientRect().top <= 150) {
+            currentId = section.id;
+        }
+    });
+    
+    navLinks.forEach(link => {
+        link.classList.remove('active');
+        if (currentId && link.href.includes('#' + currentId)) {
+            link.classList.add('active');
+        } else if (!currentId && link === navLinks[0]) {
+            link.classList.add('active');
+        }
+    });
+}
+
+document.addEventListener('scroll', updateActiveNav);
+document.addEventListener('DOMContentLoaded', updateActiveNav);
 </script>
 </body>
 </html>`
