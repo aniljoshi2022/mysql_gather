@@ -1,6 +1,6 @@
 # 🐬 MySQL Gather
 
-A Go-based tool to gather MySQL insight and performance metrics and output it in an HTML report.
+A Go-based tool to gather MySQL insight and performance metrics in a single HTML file.
 
 ## ⌛️How to Run
 
