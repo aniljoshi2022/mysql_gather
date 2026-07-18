@@ -60,11 +60,6 @@ chmod +x mysql_gather
 
 <img width="3004" height="1600" alt="image" src="https://github.com/user-attachments/assets/a550c7a6-9651-4350-86a9-e558b09e7fb0" />
 
-|                     |                             |
-| ------------------- | --------------------------- |
-| **mysql_gather UI** | **HA/Replication Topology** |
-
-
 
 
 ## **🔖Usage**
